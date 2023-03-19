@@ -20,8 +20,8 @@ def messageblock(lst):
 
 	return res
 
-def ok_html(doc, SR):
-	SR('200 Ok', [('Content-Type', 'text/html')])
+def ok_html(doc, SR, extra_headers=[]):
+	SR('200 Ok', [('Content-Type', 'text/html')] + extra_headers)
 	return bytes(doc, "UTF-8")
 
 def notfound_html(doc, SR):
@@ -123,6 +123,9 @@ def assert_valid(rex, data):
 	DP('GAM validate %s by regex %s' % (data, rex))
 	if re.search(just(rex), data) is None:
 		raise BadGamError('data "%s" failed regex "%s"' % (data, rex))
+
+class BadGamWarning(Exception):
+	pass
 
 class BadGamError(Exception):
 	pass
@@ -230,11 +233,7 @@ class Gam:
 		self.stamps.append(val)
 
 	def get_t(self):
-		now = datetime.utcnow().timestamp()
-		start = self.timestamp()
-		t = now - start
-		DP('gett: %g = %g - %g' % (t, now, start))
-		return t
+		return datetime.utcnow().timestamp() - self.timestamp()
 
 	def _started_str(self, timestamp):
 		return datetime.fromtimestamp(timestamp) \
@@ -299,18 +298,13 @@ class GamSt:
 
 	def comm_check(self, comm, regex, loaded=True):
 		if loaded and not self.loaded():
-			raise BadGamError('game not loaded')
+			raise BadGamWarning('game not loaded')
 		assert_valid(regex, comm)
 			
 	def dispatch_game(self, comm):
 		self.set_parse_st(GamSt.ST_GAM)
 		return (True, 'start GAM block')
 
-	REPORT_FORM="""
-REPORT:
-\tt=%(t)s
-\tm=%(money)d
-"""
 	def attempt_load(self):
 		name = '%s.game' % self.user
 		header = 'LOAD'
@@ -328,6 +322,8 @@ REPORT:
 		header = 'SAVE'
 		try:
 			with open(name, 'w') as f:
+				self.history += ['WARP %d' % \
+					(self.game.get_t() if self.game is not None else 0)]
 				for line in self.history:
 					print(line, file=f)
 			return '%s to %s' % (header, name)
@@ -338,8 +334,15 @@ REPORT:
 	def dispatch_drop(self, comm):
 		name = '%s.game' % self.user
 
-		num = int(comm[1])
-		if num > len(self.history):
+		if len(comm) > 1:
+			try:
+				num = int(comm[1])
+			except ValueError:
+				num = 0
+		else:
+			num = 0
+
+		if num > len(self.history) or num == 0:
 			try:
 				if os.path.exists(name):
 					os.remove(name)
@@ -360,14 +363,28 @@ REPORT:
 	def dispatch_dump(self, comm):
 		return (True, '%s.game dump:\n%s' % (self.user, '\n'.join(self.history)))
 
+	REPORT_FORM="""REPORT:
+\tt=%(t)s
+"""
+
 	def dispatch_report(self, comm):
-		message = GamSt.REPORT_FORM % { 't' : self.game.get_t(), 
-		'money' : self.game.schema['poly:money'][1].f(self.game.get_t()) }
+
+		message = GamSt.REPORT_FORM % { 't' : self.game.get_t() }
+
+		for k in self.game.schema:
+			p = self.game.schema[k]
+			message += '\t%s=%s\n' % (str(nam), str(p[1]))
 
 		return (True, message)
 
 	def dispatch_warp(self, comm):
-		time = int(comm[1])
+		if len(comm) > 1:
+			try:
+				time = int(comm[1])
+			except ValueError:
+				time = 0
+		else:
+			time = 0
 		self.game.start(self.game.timestamp() - time)
 		return (True, 'game warped %d seconds' % time)	
 
@@ -403,9 +420,10 @@ REPORT:
 		try:
 			self.newgame(Gam(self.get_parse_bf(), self.user))
 			return (True, 'new game started for user "%s"' % self.user)
-		except BadGamError as e:
-			message = 'new game failed: %s' % str(e)
-			return (False, message)
+		except BadGamWarning as e:
+			return (True, 'newgame() warn: %s' % str(e))
+		except Exception as e:
+			return (False, 'newgame() error: %s' % str(e))
 
 	def dispatch_input_line(self, line):
 		assert_valid(COMM_re, line)
@@ -430,11 +448,13 @@ REPORT:
 
 		try:
 			(success, message) = self.dispatch_input_line(line)
-		except BadGamError as e:
-			(success, message) = (False, 'error: %s' % str(e))
+		except BadGamWarning as e:
+			(success, message) = (True, 'run_step() warning: %s' % str(e))
+		except Exception as e:
+			(success, message) = (False, 'run_step() error: %s' % str(e))
 			self.invalidate()
 
-		output += '> ' + message + '\n'
+		output += message + '\n'
 		DP(output)
 		
 		if success:
@@ -489,6 +509,12 @@ def handle_game(env, SR):
 	<textarea class="game_output" name="out" readonly>%(output)s</textarea>
 </form>
 <br />
+<form method="post" class="fast_game_input">
+	<label for="in">Fast Input</label>
+	<input type="text" class="fast_game_input" name="in" />
+	<br />
+	<button type="submit">Submit</button>
+</form>
 <form method="post" class="game_input">
 	<label for="in">Input</label>
 	<textarea class="game_input" name="in"></textarea>
