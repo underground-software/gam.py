@@ -91,7 +91,7 @@ def is_post_req(env):
 # GAME_LINE := TYPE_IDENT VAL\n | GAME_LINE TYPE:IDENT VAL\n
 # IDENT :=~ [a-zA-Z]+
 # TYPE := "poly" | "const"
-# POLY := NUMxNUM | NUMxNUM/POLY
+# POLY := NUM:NUM | NUM:NUM/POLY
 # CONST := [_0-9a-zA-Z]+
 # NUM ~= [1-9]?[0-9]*
 # VAL := POLY | CONST
@@ -100,7 +100,7 @@ def is_post_req(env):
 TYPE_re		='(poly|const)'
 IDENT_re	='[a-zA-Z]+'
 NUM_re		='[0-9]+\.?[0-9]*'
-POLY_re		='(%sx%s\/?)+' 	% (NUM_re, NUM_re)
+POLY_re		='(%s:%s\/?)+' 	% (NUM_re, NUM_re)
 CONST_re 	='[_0-9a-zA-Z]+'
 VAL_re 		='(%s|%s)' 	% (POLY_re, CONST_re)
 TYPE_IDENT_re	='%s:%s'	% (TYPE_re, IDENT_re)
@@ -161,7 +161,7 @@ class GamValPoly(GamVal):
 		DP(str(val))
 		pairs_raw = val.split('/')
 		self.pairs = [(float(pair[0]), float(pair[1])) \
-			for pair in [pair_raw.split('x') \
+			for pair in [pair_raw.split('-') \
 				for pair_raw in pairs_raw]]
 
 	def _str(self, fmt, sep):
@@ -204,9 +204,202 @@ class GamValConst(GamVal):
 	def __repr__(self):
 		return 'GameValConst(%s)' % repr(self.val)
 	
-class GamMove:
-	def __init__(self, move):
-		self.move = move
+class GamLine:
+
+	NULL=chr(0)
+	CH_OTH=1<<0	# character not included
+	CH_ALP=1<<1	# alphabetic character (both cases)
+	CH_NUM=1<<2	# numeric character
+	CH_SPC=1<<3	# whitespace character
+	CH_COL=1<<4	# colon (:)
+	CH_SLS=1<<5	# slash (/)
+	CH_DOT=1<<6	# dot (.)
+	CH_QUT=1<<7	# quote (")
+	CH_NIL=1<<8	# GamLine.NULL
+	def chartype(self, char):
+		if char.isalpha():
+			return GamLine.CH_ALP
+		elif char.isdigit():
+			return GamLine.CH_NUM
+		elif char.isspace():
+			return GamLine.CH_SPC
+		elif char == ':':
+			return GamLine.CH_COL
+		elif char == '/':
+			return GamLine.CH_SLS
+		elif char == '.':
+			return GamLine.CH_DOT
+		elif char == '"':
+			return GamLine.CH_QUT
+		elif char == GamLine.NULL:
+			return GamLine.CH_NIL
+		else:
+			return GamLine.CH_OTH
+
+	TK_TXT=1	# unquoted text (no spaces)
+	TK_NUM=2	# number
+	TK_TYP=3	# type name
+	TK_FSP=4	# field seperator
+	TK_RSP=5	# record seperator
+	TK_NWL=6	# newline
+
+	# input format: 
+	# INPUT := COMM | INPUT\nCOMM
+	# COMM := GAME | START_LINE | WARP_LINE | REPORT_LINE | DUMP_LINE
+	# GAME := "GAM"\nGAME_LINE "MAG"
+	# TYPE_IDENT := TYPE:IDENT
+	# GAME_LINE := TYPE_IDENT VAL\n | GAME_LINE TYPE:IDENT VAL\n
+	# IDENT :=~ [a-zA-Z]+
+	# TYPE := "poly" | "const"
+	# POLY := NUM-NUM | NUM-NUM/POLY
+	# CONST := [_0-9a-zA-Z]+
+	# NUM ~= [1-9]?[0-9]*
+	# VAL := POLY | CONST
+	# START_LINE := START | START <unix_timestamp>
+	def lex_line(self, line):
+		idx=0
+		arg_cnt=0
+		def buff_default():
+			return [None, '']
+		
+		self._lex_buff = buff_default()
+		self._res=[]
+		def buff_emit():
+			#DP('buff emit %s' % str(self._lex_buff))
+			if self._lex_buff[0] is not None:
+				self._res.append(tuple(self._lex_buff))
+			self._lex_buff = buff_default()
+
+		def buff_set_tk(tk):
+			#DP('buff set tk %s' % tk)
+			self._lex_buff[0] = tk
+
+		def buff_in(txt):
+			#DP('buff in %s' % txt)
+			self._lex_buff[1] += txt
+			
+
+		ST_START=1
+		ST_TEXT=2
+		ST_QUOTE=3
+		ST_NUM=4
+		ST_ENDQT=5
+
+		st=ST_START
+
+		typ=GamLine.CH_OTH
+		in_quote=False
+		dot_unseen=True
+
+		line += GamLine.NULL
+		i=0
+		while i < len(line):
+			typ = self.chartype(line[i])
+			DP('lex %d char "%s/%d" typ %d st %d' % (i, line[i], ord(line[i]), typ, st))
+			if typ == GamLine.CH_OTH:
+				raise BadGamError('lex: unknown character "%s"' % line[i])
+			if st == ST_TEXT:
+			# if not in a quote, end of alpha means end of word
+				# special case: quote within string starts
+				# new quoted text and saves word
+				if typ == GamLine.CH_QUT:
+					buff_emit()
+				elif typ == GamLine.CH_ALP:
+					buff_in(line[i])
+				else: #typ != GamLine.CH_ALP
+					# append buff to result and wipe buff
+					buff_emit()
+					st=ST_START
+			elif st == ST_QUOTE:
+				if typ == GamLine.CH_QUT:
+					buff_emit()
+					st=ST_ENDQT
+				else:
+					buff_in(line[i])
+			elif st == ST_NUM:
+				if typ == GamLine.CH_NUM:
+					buff_in(line[i])
+				# one decimal point per number
+				elif dot_unseen and typ == GamLine.CH_DOT:
+					buff_in(line[i])
+					dot_unseen=False
+				else:
+					buff_emit()
+					st=ST_START
+			elif st == ST_START:
+				pass
+			else:
+				raise BadGamError('lex: unknown state %d' % st)
+
+			if st == ST_START:
+				if typ == GamLine.CH_NUM:
+					buff_emit()
+					buff_set_tk(GamLine.TK_NUM)
+					buff_in(line[i])
+					dot_unseen=True
+					st=ST_NUM
+				elif typ == GamLine.CH_ALP:
+					buff_emit()
+					buff_set_tk(GamLine.TK_TXT)
+					buff_in(line[i])
+					st=ST_TEXT
+				elif typ == GamLine.CH_NIL:
+					buff_emit()
+
+			if st != ST_QUOTE and st != ST_ENDQT:
+				if typ == GamLine.CH_COL:
+					buff_emit()
+					buff_set_tk(GamLine.TK_FSP)
+					buff_in(':')
+					st = ST_START
+				elif typ == GamLine.CH_SLS:
+					buff_emit()
+					buff_set_tk(GamLine.TK_RSP)
+					buff_in('/')
+					st = ST_START
+				elif typ == GamLine.CH_QUT:
+					buff_emit()
+					buff_set_tk(GamLine.TK_TXT)
+					st=ST_QUOTE
+			elif st == ST_ENDQT:
+				st=ST_START
+			i += 1
+
+		if st == ST_QUOTE:
+			raise BadGamError('lex: umatched "')
+		#elif st != ST_START:
+			#raise BadGamError('ended lex in state %s' % st)
+		DP('lexed line %s' % str(self._res))
+		return self._res
+
+	def __init__(self, line):
+		self.line = line
+		self.lexxed = self.lex_line(self.line)
+		self.lexxed.append((GamLine.TK_NWL, '\n'))
+
+
+	def __str__(self):
+		return str(self.lexxed)
+
+
+class GamParser:
+	ST_NONE	=1<<0
+	ST_GAM	=1<<1
+	def parse_st_str(self, st):
+		return {
+			GamParser.ST_NONE : 'none',
+			GamParser.ST_GAM : 'gam'
+		}[st]
+
+	def __init__(self):
+		self.lines = []
+		
+	def parse(self, line):
+		pass
+
+	def addline(self, line):
+		self.lines = self.parse(line)
+	
 
 # contents should be a list of GAME_LINE items
 class Gam:
@@ -322,8 +515,6 @@ class GamSt:
 		header = 'SAVE'
 		try:
 			with open(name, 'w') as f:
-				self.history += ['WARP %d' % \
-					(self.game.get_t() if self.game is not None else 0)]
 				for line in self.history:
 					print(line, file=f)
 			return '%s to %s' % (header, name)
@@ -342,21 +533,11 @@ class GamSt:
 		else:
 			num = 0
 
-		if num > len(self.history) or num == 0:
-			try:
-				if os.path.exists(name):
-					os.remove(name)
-				#with open(name, 'w') as f:
-					#print("", file=f)
-				return (True, 'dropped save %s\n' % name)
-			except OSError:
-				# there is prbably just no saved file
-				return (False, 'no such game %s' % name)
-		else:
-			i=0
-			while i < num and i < len(self.history):
-				del self.history[i]
-			return (True, 'delete %d items from history' % num)
+		i=0
+		while i < num and i < len(self.history):
+			del self.history[i]
+		self.attempt_save()
+		return (True, 'delete %d items from history' % num)
 			
 		
 
@@ -441,24 +622,37 @@ class GamSt:
 		return self.valid
 
 	def run_step(self):
-		line = self.input_buffer[0]
-		
-		output='[%d] RUN %s\n' % (self.step_counter, line)
-		self.step_counter += 1
-
+		next_line = self.input_buffer[0]
 		try:
-			(success, message) = self.dispatch_input_line(line)
+			# lex next line
+			line = GamLine(next_line)
+			#(success, message) = self.dispatch_input_line(line)
+			(success, message) = (len(line.lexxed) > 1, str(line.lexxed))
 		except BadGamWarning as e:
+			line = None
 			(success, message) = (True, 'run_step() warning: %s' % str(e))
 		except Exception as e:
+			line = None
 			(success, message) = (False, 'run_step() error: %s' % str(e))
 			self.invalidate()
 
+		# include newline added
+		if line and len(line.lexxed) < 2:
+			# skip empty lines
+			output = '# skip empty line\n'
+		else:
+			output='[%d] RUN %s\n' % (self.step_counter, next_line)
+			self.step_counter += 1
+		
 		output += message + '\n'
 		DP(output)
+
 		
 		if success:
-			self.history.append(line)
+			self.history.append(next_line)
+			if line.lexxed[0][1] == 'DROP':
+				DP('in DROP!')
+				self.dispatch_drop(['DROP', '100'])
 			
 		del self.input_buffer[0]
 		return output
@@ -486,11 +680,15 @@ def process_req_body(req_body, user):
 		.replace('%0D%0A','\n') \
 		.replace('+', ' ') \
 		.replace('%3A', ':') \
-		.replace('%2F', '/')
+		.replace('%2F', '/') \
+		.replace('%22', '"')
 	DP('input = {\n%s\n}' % with_lines)
 
 	lines = with_lines.split('\n')
-
+	if lines == ['']:
+		#empty singleton means empty lines
+		lines = []
+	
 	return run_game(lines, user)
 
 def handle_game(env, SR):
@@ -506,21 +704,28 @@ def handle_game(env, SR):
 	base = """
 <form class="game_output" class="game_output">
 	<label for="out">Output</label>
-	<textarea class="game_output" name="out" readonly>%(output)s</textarea>
+	<textarea id="game_output" class="game_output" name="out" readonly>%(output)s</textarea>
 </form>
+	<script type="text/javascript">
+		var TA = document.getElementById('game_output')
+		TA.scrollTop = TA.scrollHeight
+	</script>
 <br />
-<form method="post" class="fast_game_input">
+
+<div class="game_input">
+<form method="post" class="fast_game_input"> <div class="fast_game_input">
 	<label for="in">Fast Input</label>
-	<input type="text" class="fast_game_input" name="in" />
+	<input type="text" class="fast_game_input" name="in" autofocus />
 	<br />
 	<button type="submit">Submit</button>
-</form>
-<form method="post" class="game_input">
+</div></form>
+<form method="post" class="multi_game_input"> <div class="multi_game_input">
 	<label for="in">Input</label>
-	<textarea class="game_input" name="in"></textarea>
+	<textarea class="multi_game_input" name="in"></textarea>
 	<br />
 	<button type="submit">Submit</button>
-</form>
+</div></form>
+</div>
 """ % { 'output' : process_req_body(req_body, user) }
 
 

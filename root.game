@@ -1,9 +1,2 @@
-WARP 0
-GAM
-poly:money 0x0/0x1/1x1
-MAG
-WARP 0
-DROP
-WARP 0
-GAM
-WARP 0
+do
+root
