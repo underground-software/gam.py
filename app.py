@@ -383,8 +383,11 @@ class GamLine:
 
 
 class GamParser:
-	ST_NONE	=1<<0
-	ST_GAM	=1<<1
+	ST_NONE	= 1<<0
+	ST_GAM	= 1<<1
+	def state():
+		return self._state
+
 	def parse_st_str(self, st):
 		return {
 			GamParser.ST_NONE : 'none',
@@ -392,10 +395,13 @@ class GamParser:
 		}[st]
 
 	def __init__(self):
-		self.lines = []
-		
+		self.input_history = []
+		self.state = GamParser.ST_NONE
+	
 	def parse(self, line):
-		pass
+		self.input_history.append(line)
+		for tk, val in lines:
+			DP('PARSE tk=%s, val=%s' % (tk,val))
 
 	def addline(self, line):
 		self.lines = self.parse(line)
@@ -484,10 +490,13 @@ class GamSt:
 		self.history = []
 		self.user = user
 		self.game = None
+		self.parser = GamParser()
 
 		self.step_counter = 0
 		self.parse_st = GamSt.ST_NONE
 		self.parse_bf = {}
+
+	
 
 	def comm_check(self, comm, regex, loaded=True):
 		if loaded and not self.loaded():
