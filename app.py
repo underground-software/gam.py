@@ -616,8 +616,6 @@ class GamParser:
 
 			return [Gamnam(vl0, vl2), GamValConst(vl3)]
 
-		def o2(a, b):
-			return '%s\t%s\n' % (a,b)
 
 		def args_poly(args):
 			argc = len(args)
@@ -639,6 +637,9 @@ class GamParser:
 
 			raw = ''.join([x[1] for x in args[3:]])
 			return [GamNam(vl0, vl2), GamValPoly(raw)]
+
+		def o2(a, b):
+			return '%s\t%s\n' % (a,b)
 		
 		def delta_gam(gs, args):
 			if len(args) < 1:
