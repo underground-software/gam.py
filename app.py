@@ -527,7 +527,7 @@ class GamParser:
 \t\tGot:\t%s
 %s"""
 	def ArgParseError(self,i,  act, want, got, opt=''):
-		self.ParseError(i, GamParser.ARG_PARSE_FMT % (act, want, got, opt))
+		self.ParseError(i, msg=GamParser.ARG_PARSE_FMT % (act, want, got, opt))
 	
 	def parse(self, line, i):
 		
