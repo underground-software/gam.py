@@ -151,8 +151,6 @@ class GamError(Exception):
 		super().__init__(m)
 
 	def __str__(self):
-		DP('error fmt %s' % self.message)
-		DP('error fmt %s' % self.state_string)
 		return GamError.ERROR_FMT % {
 			'header': 	self.header,
 			'line': 	self.line,
@@ -363,7 +361,6 @@ class GamLine:
 		i=0
 		while i < len(line):
 			typ = self.chartype(line[i])
-			DP('lex %d char "%s/%d" typ %d st %d' % (i, line[i], ord(line[i]), typ, st))
 			if typ == GamLine.CH_OTH:
 				self.LexxError('invalid character "%s"' % line[i], st, self.find_st_str(st))
 			if st == GamLine.ST_TEXT:
@@ -684,20 +681,30 @@ class GamParser:
 		def delta_drop(gs, args):
 			argc = len(args)
 			e=''
+			# include self in num to drop
 			if argc == 0:
-				# include self in num to drop
 				gs.drop(gs.step_counter + 1)
 				e='ALL'
 			else:
-				# include self in num to drop
 				gs.drop(args[0] + 1)
 				e=str(args[0])
 
 			return o2('DROP', e)
 
 		def delta_dump(gs, args):
-			# TODO
-			return o2('DUMP', e)
+			argc = len(args)
+			e=''
+			# don't include self in num to dump
+			if argc == 0:
+				o = '\n'.join(gs.history()) + '\n'
+				e ='ALL'
+			else:
+				h = gs.history(n=gs.step_counter)
+				o = '\n'.join(h) + '\n'
+				e=str(args[0])
+			output = o2('DUMP', e)
+			output += o
+			return output
 
 		def delta_report(gs, args):
 			output = 'REPORT\n'
@@ -733,27 +740,28 @@ class GamParser:
 		def delta_const(gs, args):
 			gs.stack_push(args[0])
 			gs.stack_push(args[1])
-			return '  SET\t%s\tTO\t %s\n' % (str(args[0]), str(args[1]))
+			return 'SET\t%s\tTO\t %s\n' % (str(args[0]), str(args[1]))
 
 		def delta_poly(gs, args):
 			gs.stack_push(args[0])
 			gs.stack_push(args[1])
-			return '  SET\t%s\tTO\t %s\n' % (str(args[0]), str(args[1]))
+			return 'SET\t%s\tTO\t %s\n' % (str(args[0]), str(args[1]))
 
 		
 		state_map = {
-		# ACT 	 ARGS_VALID?	DELTA FUNC	STATE CHANGE
+		# ACT 	 ARGS_VALID?		DELTA FUNC	STATE CHANGE
 		GamParser.ST_NONE : {
-		'GAM': 	 (args_gam, 	delta_gam, 	GamParser.ST_GAM),
-		'DROP':  (args_drop,	delta_drop, 	None),
-		'DUMP':  (lambda x:[],	delta_dump, 	None),
-		'REPORT':(lambda x:[],	delta_report, 	None),
-		'WARP':	 (args_warp,	delta_warp, 	None)},
+		'GAM': 	 (args_float_1opt, 	delta_gam, 	GamParser.ST_GAM),
+		'DROP':  (args_int_1opt,	delta_drop, 	None),
+		'DUMP':  (args_int_1opt,	delta_dump, 	None),
+		'REPORT':(args_int_1opt,	delta_report, 	None),
+		'WARP':	 (args_int_1,		delta_warp, 	None)},
 		GamParser.ST_GAM : {
-		'DROP':  (args_drop,	delta_drop, 	None),
-		'MAG': 	 (lambda x:[],	delta_mag, 	GamParser.ST_NONE),
-		'CONST': (args_const,	delta_const,  	None),
-		'POLY':	 (args_poly,	delta_poly, 	None)}
+		'DROP':  (args_int_1opt,	delta_drop, 	None),
+		'DUMP':  (args_int_1opt,	delta_dump, 	None),
+		'MAG': 	 (lambda x:[],		delta_mag, 	GamParser.ST_NONE),
+		'CONST': (args_const,		delta_const,  	None),
+		'POLY':	 (args_poly,		delta_poly, 	None)}
 		}
 
 		# get map of valid acts for current state
@@ -886,9 +894,13 @@ class GamSt:
 	def is_valid(self):
 		return self.error is None
 
-	def history(self):
-		d = max(self.step_counter - self._drop, 0)
-		return [c.line.line for c in self.comms[:d]] 
+	def history(self, n=0):
+		d = self.step_counter - self._drop
+		if n == 0:
+			s = 0
+		else:
+			s = d - n
+		return [c.line.line for c in self.comms[s:d]] 
 	
 	def report(self):
 		return self.game.report() if self.game is not None else None
@@ -958,7 +970,6 @@ def run_game(user_lines, user):
 	
 	msg, saved_lines = attempt_load(user)
 	output += msg
-	DP('USER LINES: [%s]\n' % user_lines)
 	input_lines = saved_lines + user_lines
 
 	out_pre=''
