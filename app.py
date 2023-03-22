@@ -138,7 +138,7 @@ class BadGamError(Exception):
 
 class GamError(Exception):
 	ERROR_FMT="""%(header)s
-	line:\t%(line)s
+	line:\t%(line)d
 	state:\t%(state_string)s (%(state)d)
 	msg:\t%(message)s
 """
@@ -174,7 +174,7 @@ class GamParseError(GamError):
 class GamLexxError(GamError):
 	LEXX_HEADER='Lexx Error:'
 
-	def __init__(self, n, st, st_str, msg):
+	def __init__(self, msg='undefined lexx error', n=-1, st=-1, st_str='?'):
 		super().__init__(n=n, st=st, st_str=st_str, \
 			h=GamLexxError.LEXX_HEADER, m=msg)
 
@@ -329,8 +329,7 @@ class GamLine:
 
 
 	def LexxError(self, msg, st, st_str):
-		raise GamLexxError(self.count, st, st_str, msg)
-
+		raise GamLexxError(n=self.count, st=st, st_str=st_str, msg=msg)
 	# main lex function
 	def lex_line(self, line):
 		idx=0
@@ -484,11 +483,11 @@ class GamEXEComm:
 	def __repr__(self):
 		return 'EXE(%s)' % repr(self.line.line)
 
-def o3(a, b, c, sep=''):
-	return '%s\t%s%s\t%s%s\n' % (a, sep, b, sep, c)
+def o3(a, b, c, sep='', pre=''):
+	return '%s%s\t%s%s\t%s%s\n' % (pre, a, sep, b, sep, c)
 
-def o2(a, b, sep=''):
-	return '%s\t%s%s\n' % (a, sep, b)
+def o2(a, b, sep='', pre=''):
+	return '%s%s\t%s%s\n' % (pre, a, sep, b)
 	
 
 class GamParser:
@@ -518,15 +517,15 @@ class GamParser:
 		self._state = GamParser.ST_NONE
 
 	def ParseError(self, i, msg):
-		raise GamParseError(i, self.state(), \
-			self.state_str(), msg)
+		raise GamParseError(n=i, st=self.state(), \
+			st_str=self.state_str(), msg=msg)
 
 	ARG_PARSE_FMT="""Invalid argument:
 \t\tAct:\t%s
 \t\tWant:\t%s
 \t\tGot:\t%s
 %s"""
-	def ArgParseError(self,i,  act, want, got, opt=''):
+	def ArgParseError(self, i, act, want, got, opt=''):
 		self.ParseError(i, msg=GamParser.ARG_PARSE_FMT % (act, want, got, opt))
 	
 	def parse(self, line, i):
@@ -541,38 +540,55 @@ class GamParser:
 				return None
 			return a[n][1]
 
-		def args_num_1opt(args, coersion, tn):
+
+		def args_num_1(args, coersion, tn, opt=False):
 			argc = len(args)
 			ac = _vl(0, args)
 			tk = _tk(1, args)
 			vl = _vl(1, args)
 
+			def validate_num_1opt(E, argc, tk):
+				if argc > 2:
+					E('0 or 1 args', '%d args\n' % argc)
+				elif argc == 2 and tk != GamLine.TK_NUM:
+					E('1 number', 'expected number\n')
+
+			def validate_num_1nonopt(E, argc, tk):
+				if argc != 2:
+					E('1 args', '%d args\n' % argc)
+				elif tk != GamLine.TK_NUM:
+					E('1 number', 'expected number\n')
+
 			def E(want, msg):
 				nonlocal vl
 				got = str(vl)
 				self.ArgParseError(i, ac, want, got, opt=msg)
-
-			# only one optional arg now
-			if argc > 2:
-				E('0 or 1 args', '%d args\n' % argc)
-			elif argc == 1:
-				return []
-			elif argc == 2 and tk != GamLine.TK_NUM:
-				E('1 number', 'expected number\n')
-			# else argc == 2 
+			if opt:
+				validate_num_1opt(E, argc, tk)
+				if argc == 1:
+					return []
+			else:
+				validate_num_1nonopt(E, argc, tk)
 
 			try:
 				return [coersion(vl)]
 			except TypeError:
 				E(tn, 'cannnot coerce to %s\n' % tn)
 
+		def args_num_1opt(args, coersion, tn, opt=True):
+			return args_num_1(args, coersion, tn, opt=True)
+
 		def args_int_1opt(args):
-			return args_num_1opt(args,
-				lambda x: int(x), 'int')
+			return args_num_1(args,
+				lambda x: int(x), 'int', opt=True)
+
+		def args_int_1(args):
+			return args_num_1(args,
+				lambda x: int(x), 'int', opt=False)
 
 		def args_float_1opt(args):
-			return args_num_1opt(args,
-				lambda x: float(x), 'float')
+			return args_num_1(args,
+				lambda x: float(x), 'float', opt=True)
 
 		def args_gam(args):
 			return args_float_1opt(args)
@@ -581,7 +597,7 @@ class GamParser:
 			return args_int_1opt(args)
 
 		def args_warp(args):
-			return args_int_1opt(args)
+			return args_int_1(args)
 
 		def args_mag(args):
 			return []
@@ -681,7 +697,7 @@ class GamParser:
 
 		def delta_dump(gs, args):
 			# TODO
-			return  'DMP\n'
+			return o2('DUMP', e)
 
 		def delta_report(gs, args):
 			output = 'REPORT\n'
@@ -694,21 +710,22 @@ class GamParser:
 		def delta_warp(gs, args):
 			secs = float(args[0])
 			gs.warp(secs)
-			return 'WRP\t%s\n' % secs
+			return o2('WARP', secs)
 
 		def delta_mag(gs, args):
 			schema = []
 			a, b = gs.stack_pop(), gs.stack_pop()
 			while b != 'GAM':
-				if gs.stack_empty():
-					raise ('mag: stack underflow')
+				if len(gs.stack) < 2:
+					# TODO
+					raise BadGamError('mag: stack underflow')
 				
 				schema += [(b, a)]
 
 				a = gs.stack_pop()
 				b = gs.stack_pop()
 
-			self.game = Gam(schema, a.timestamp())
+			gs.game = Gam(schema, a.timestamp())
 		
 			return o2('MAG', a)
 						
@@ -784,11 +801,12 @@ class Gam:
 		return self._started_str(self.timestamp)
 
 	def report(self):
-		output = o3('nam(f)', 'f(t)', 'ft')
-		output += o2('t', self.t(), sep=' = ')
+		output = o3('nam(f)', 'f(t)', 'f', pre='\t')
+		output += o2('t', self.t(), sep=' = ', pre='\t')
 		for k in self.schema:
 			pair = self.schema[k]
-			output += o3(k, str(pair[1].f(self.t())), str(v))
+			output += o3(k, str(pair[1].f(self.t())),
+				str(pair[1]), pre='\t')
  
 		return output
 
@@ -856,7 +874,7 @@ class GamSt:
 			# only incremented on success
 		except Exception as e:
 			output += 'exception: %s\n' % str(e)
-			output += 'stack: %s\n' % self.stack
+			output += 'stack: %s\n' % str(self.stack)
 			tb = traceback.format_exc()
 			output += '%s\n' % str(tb)
 			self.error = e
@@ -925,11 +943,11 @@ def attempt_fop(do, ls, u, m, f):
 def attempt_load(u):
 	ls  = attempt_fop(do_load, None, u,
 		'LOAD from ', 'FAIL read from')
-	DP('DO LOAD : [%s]\n' % str(ls))
+	DP('DO LOAD : [%s]' % str(ls))
 	return ls
 
 def attempt_save(ls, u):
-	DP('DO SAVE: [%s]\n' % ls)
+	DP('DO SAVE: [%s]' % ls)
 	return attempt_fop(do_save, ls, u,
 		'SAVE to', 'FAIL write to')
 
@@ -943,8 +961,8 @@ def run_game(user_lines, user):
 	DP('USER LINES: [%s]\n' % user_lines)
 	input_lines = saved_lines + user_lines
 
+	out_pre=''
 	for l in input_lines:
-		out_pre=''
 		out_pre += gs.lexx_parse(l)
 		if gs.error is not None:
 			output += out_pre
@@ -957,7 +975,9 @@ def run_game(user_lines, user):
 		h = gs.history()
 		db = 'History:\n%s\n' % str(h)
 		DP(db)
-		output += attempt_save(h, user)[0]
+		tmp, res = attempt_save(h, user)
+		if res is not None:
+			output += tmp
 
 	return output
 
