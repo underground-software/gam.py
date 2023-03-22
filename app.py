@@ -128,7 +128,7 @@ def just(reg):
 def assert_valid(rex, data):
 	DP('GAM validate %s by regex %s' % (data, rex))
 	if re.search(just(rex), data) is None:
-		raise GamParseError(m='data "%s" failed regex "%s"' % (data, rex))
+		raise GamParseError(msg='data "%s" failed regex "%s"' % (data, rex))
 
 class BadGamWarning(Exception):
 	pass
@@ -142,7 +142,7 @@ class GamError(Exception):
 	state:\t%(state_string)s (%(state)d)
 	msg:\t%(message)s
 """
-	def __init__(self, n='?', st='?', st_str='?', h='', m='undefined error'):
+	def __init__(self, n=-1, st=-1, st_str='?', h='', m='undefined error'):
 		self.line = n
 		self.state = st
 		self.state_string = st_str
@@ -163,7 +163,7 @@ class GamError(Exception):
 class GamParseError(GamError):
 	PARSE_HEADER='Parse Error:'
 
-	def __init__(self, n, st, st_str, msg):
+	def __init__(self, msg='undefined parse error', n=-1, st=-1, st_str='?'):
 		super().__init__(n=n, st=st, st_str=st_str, \
 			h=GamParseError.PARSE_HEADER, m=msg)
 
@@ -669,11 +669,12 @@ class GamParser:
 			argc = len(args)
 			e=''
 			if argc == 0:
-				# include self in drop max
+				# include self in num to drop
 				gs.drop(gs.step_counter + 1)
 				e='ALL'
 			else:
-				gs.drop(args[0])
+				# include self in num to drop
+				gs.drop(args[0] + 1)
 				e=str(args[0])
 
 			return o2('DROP', e)
@@ -732,6 +733,7 @@ class GamParser:
 		'REPORT':(lambda x:[],	delta_report, 	None),
 		'WARP':	 (args_warp,	delta_warp, 	None)},
 		GamParser.ST_GAM : {
+		'DROP':  (args_drop,	delta_drop, 	None),
 		'MAG': 	 (lambda x:[],	delta_mag, 	GamParser.ST_NONE),
 		'CONST': (args_const,	delta_const,  	None),
 		'POLY':	 (args_poly,	delta_poly, 	None)}
@@ -916,9 +918,9 @@ def do_save(u, n, ls):
 def attempt_fop(do, ls, u, m, f):
 	n = '%s.game' % u
 	try:
-		return ('%s %s\n' % (m, n), do(u, n, ls=ls))
+		return ('[%s %s]\n' % (m, n), do(u, n, ls=ls))
 	except FileNotFoundError:
-		return ('%s %s\n' % (f, n), [])
+		return ('[%s %s]\n' % (f, n), [])
 
 def attempt_load(u):
 	ls  = attempt_fop(do_load, None, u,
@@ -953,7 +955,8 @@ def run_game(user_lines, user):
 	
 	if gs.is_valid():
 		h = gs.history()
-		output += 'History:\n%s\n' % str(h)
+		db = 'History:\n%s\n' % str(h)
+		DP(db)
 		output += attempt_save(h, user)[0]
 
 	return output
