@@ -1,6 +1,7 @@
 import random, html, sys, re, os
 from urllib.parse import parse_qs
 from datetime import datetime
+import traceback
 
 KDLP_URLBASE='/var/www/html/kdlp.underground.software/'
 VERSION="0.1"
@@ -8,6 +9,9 @@ APPLICATION="mars"
 
 def DP(strg):
 	print(strg, file=sys.stderr)
+
+def appver():
+	return "%s %s" % (APPLICATION, VERSION)
 
 def messageblock(lst):
 	res=''
@@ -46,6 +50,8 @@ def get_authorized_user(env):
 	user = queries.get('user', None)
 	if user is not None:
 		user = user[0]
+	else:
+		return env.get('QUERY_STRING','default')
 	return user
 
 def generate_price(digits):
@@ -98,10 +104,10 @@ def is_post_req(env):
 # START_LINE := START | START <unix_timestamp>
 
 TYPE_re		='(poly|const)'
-IDENT_re	='[a-zA-Z]+'
+IDENT_re	='[a-zA-Z ./:]+'
 NUM_re		='[0-9]+\.?[0-9]*'
 POLY_re		='(%s:%s\/?)+' 	% (NUM_re, NUM_re)
-CONST_re 	='[_0-9a-zA-Z]+'
+CONST_re 	='[_0-9a-zA-Z ]+'
 VAL_re 		='(%s|%s)' 	% (POLY_re, CONST_re)
 TYPE_IDENT_re	='%s:%s'	% (TYPE_re, IDENT_re)
 GAME_re		='GAM.*'
@@ -122,7 +128,7 @@ def just(reg):
 def assert_valid(rex, data):
 	DP('GAM validate %s by regex %s' % (data, rex))
 	if re.search(just(rex), data) is None:
-		raise BadGamError('data "%s" failed regex "%s"' % (data, rex))
+		raise GamParseError(m='data "%s" failed regex "%s"' % (data, rex))
 
 class BadGamWarning(Exception):
 	pass
@@ -130,14 +136,56 @@ class BadGamWarning(Exception):
 class BadGamError(Exception):
 	pass
 
+class GamError(Exception):
+	ERROR_FMT="""%(header)s
+	line:\t%(line)s
+	state:\t%(state_string)s (%(state)d)
+	msg:\t%(message)s
+"""
+	def __init__(self, n='?', st='?', st_str='?', h='', m='undefined error'):
+		self.line = n
+		self.state = st
+		self.state_string = st_str
+		self.header = h
+		self.message = m
+		super().__init__(m)
+
+	def __str__(self):
+		DP('error fmt %s' % self.message)
+		DP('error fmt %s' % self.state_string)
+		return GamError.ERROR_FMT % {
+			'header': 	self.header,
+			'line': 	self.line,
+			'state_string': self.state_string,
+			'state':	self.state,
+			'message':	self.message}
+
+class GamParseError(GamError):
+	PARSE_HEADER='Parse Error:'
+
+	def __init__(self, n, st, st_str, msg):
+		super().__init__(n=n, st=st, st_str=st_str, \
+			h=GamParseError.PARSE_HEADER, m=msg)
+
+	def __str__(self):
+		return super().__str__()
+
+
+class GamLexxError(GamError):
+	LEXX_HEADER='Lexx Error:'
+
+	def __init__(self, n, st, st_str, msg):
+		super().__init__(n=n, st=st, st_str=st_str, \
+			h=GamLexxError.LEXX_HEADER, m=msg)
+
+	def __str__(self):
+		return super().__str__()
+
 
 class GamNam:
-	def __init__(self, data):
-		assert_valid(TYPE_IDENT_re, data)
-
-		[typ, nam] = data.split(':')
-		self.nam = nam
+	def __init__(self, typ, nam):
 		self.typ = typ
+		self.nam = nam
 
 	def __str__(self):
 		return '%s:%s' % (self.typ, self.nam)
@@ -161,7 +209,7 @@ class GamValPoly(GamVal):
 		DP(str(val))
 		pairs_raw = val.split('/')
 		self.pairs = [(float(pair[0]), float(pair[1])) \
-			for pair in [pair_raw.split('-') \
+			for pair in [pair_raw.split(':') \
 				for pair_raw in pairs_raw]]
 
 	def _str(self, fmt, sep):
@@ -205,6 +253,10 @@ class GamValConst(GamVal):
 		return 'GameValConst(%s)' % repr(self.val)
 	
 class GamLine:
+	COUNTER = 0
+	def do_count(cls):
+		cls.COUNTER += 1
+		return cls.COUNTER
 
 	NULL=chr(0)
 	CH_OTH=1<<0	# character not included
@@ -238,24 +290,41 @@ class GamLine:
 
 	TK_TXT=1	# unquoted text (no spaces)
 	TK_NUM=2	# number
-	TK_TYP=3	# type name
-	TK_FSP=4	# field seperator
-	TK_RSP=5	# record seperator
-	TK_NWL=6	# newline
+	TK_FSP=3	# field seperator
+	TK_RSP=4	# record seperator
 
-	# input format: 
-	# INPUT := COMM | INPUT\nCOMM
-	# COMM := GAME | START_LINE | WARP_LINE | REPORT_LINE | DUMP_LINE
-	# GAME := "GAM"\nGAME_LINE "MAG"
-	# TYPE_IDENT := TYPE:IDENT
-	# GAME_LINE := TYPE_IDENT VAL\n | GAME_LINE TYPE:IDENT VAL\n
-	# IDENT :=~ [a-zA-Z]+
-	# TYPE := "poly" | "const"
-	# POLY := NUM-NUM | NUM-NUM/POLY
-	# CONST := [_0-9a-zA-Z]+
-	# NUM ~= [1-9]?[0-9]*
-	# VAL := POLY | CONST
-	# START_LINE := START | START <unix_timestamp>
+	ALL_TOKENS = [TK_TXT, TK_NUM, TK_FSP, TK_RSP]
+	
+	def find_tk_str(self, tk): return {
+			GamLine.TK_TXT:  '[Token Text]',
+			GamLine.TK_NUM:  '[Token Number]',
+			GamLine.TK_FSP:  '[Token Field Sep]',
+			GamLine.TK_RSP:  '[Token Record Sep]'
+				}.get(tk,'[Token Unknown]')
+	
+
+	ST_STRT 	= 1<<1
+	ST_TEXT		= 1<<2
+	ST_QUOT		= 1<<3
+	ST_NUMB		= 1<<4
+	ST_ENQT		= 1<<5
+
+	ALL_STATES = [ST_STRT, ST_TEXT, ST_NUMB, ST_ENQT]
+
+	def find_st_str(self, st):
+		return {
+			GamLine.ST_STRT: '[Lexx State Start]',
+			GamLine.ST_TEXT: '[Lexx State Text]',
+			GamLine.ST_QUOT: '[Lexx State Quote]',
+			GamLine.ST_NUMB: '[Lexx State Number]',
+			GamLine.ST_ENQT: '[Lexx State End Quote]'
+				}.get(st,'[Lexx State Unknown]')
+
+
+	def LexxError(self, msg, st, st_str):
+		raise GamLexxError(self.count, st, st_str, msg)
+
+	# main lex function
 	def lex_line(self, line):
 		idx=0
 		arg_cnt=0
@@ -278,14 +347,7 @@ class GamLine:
 			#DP('buff in %s' % txt)
 			self._lex_buff[1] += txt
 			
-
-		ST_START=1
-		ST_TEXT=2
-		ST_QUOTE=3
-		ST_NUM=4
-		ST_ENDQT=5
-
-		st=ST_START
+		st=GamLine.ST_STRT
 
 		typ=GamLine.CH_OTH
 		in_quote=False
@@ -297,8 +359,8 @@ class GamLine:
 			typ = self.chartype(line[i])
 			DP('lex %d char "%s/%d" typ %d st %d' % (i, line[i], ord(line[i]), typ, st))
 			if typ == GamLine.CH_OTH:
-				raise BadGamError('lex: unknown character "%s"' % line[i])
-			if st == ST_TEXT:
+				self.LexxError('invalid character "%s"' % line[i], st, self.find_st_str(st))
+			if st == GamLine.ST_TEXT:
 			# if not in a quote, end of alpha means end of word
 				# special case: quote within string starts
 				# new quoted text and saves word
@@ -309,14 +371,14 @@ class GamLine:
 				else: #typ != GamLine.CH_ALP
 					# append buff to result and wipe buff
 					buff_emit()
-					st=ST_START
-			elif st == ST_QUOTE:
+					st=GamLine.ST_STRT
+			elif st == GamLine.ST_QUOT:
 				if typ == GamLine.CH_QUT:
 					buff_emit()
-					st=ST_ENDQT
+					st=GamLine.ST_ENQT
 				else:
 					buff_in(line[i])
-			elif st == ST_NUM:
+			elif st == GamLine.ST_NUMB:
 				if typ == GamLine.CH_NUM:
 					buff_in(line[i])
 				# one decimal point per number
@@ -325,114 +387,382 @@ class GamLine:
 					dot_unseen=False
 				else:
 					buff_emit()
-					st=ST_START
-			elif st == ST_START:
+					st=GamLine.ST_STRT
+			elif st == GamLine.ST_STRT:
 				pass
 			else:
 				raise BadGamError('lex: unknown state %d' % st)
 
-			if st == ST_START:
+			if st == GamLine.ST_STRT:
 				if typ == GamLine.CH_NUM:
 					buff_emit()
 					buff_set_tk(GamLine.TK_NUM)
 					buff_in(line[i])
 					dot_unseen=True
-					st=ST_NUM
+					st=GamLine.ST_NUMB
 				elif typ == GamLine.CH_ALP:
 					buff_emit()
 					buff_set_tk(GamLine.TK_TXT)
 					buff_in(line[i])
-					st=ST_TEXT
+					st=GamLine.ST_TEXT
 				elif typ == GamLine.CH_NIL:
 					buff_emit()
 
-			if st != ST_QUOTE and st != ST_ENDQT:
+			if st != GamLine.ST_QUOT and st != GamLine.ST_ENQT:
 				if typ == GamLine.CH_COL:
 					buff_emit()
 					buff_set_tk(GamLine.TK_FSP)
 					buff_in(':')
-					st = ST_START
+					st = GamLine.ST_STRT
 				elif typ == GamLine.CH_SLS:
 					buff_emit()
 					buff_set_tk(GamLine.TK_RSP)
 					buff_in('/')
-					st = ST_START
+					st = GamLine.ST_STRT
 				elif typ == GamLine.CH_QUT:
 					buff_emit()
 					buff_set_tk(GamLine.TK_TXT)
-					st=ST_QUOTE
-			elif st == ST_ENDQT:
-				st=ST_START
+					st=GamLine.ST_QUOT
+			elif st == ST_ENQT:
+				st=GamLine.ST_STRT
 			i += 1
 
-		if st == ST_QUOTE:
+		if st == GamLine.ST_QUOT:
 			raise BadGamError('lex: umatched "')
-		#elif st != ST_START:
+		#elif st != GamLine.ST_STRT:
 			#raise BadGamError('ended lex in state %s' % st)
 		DP('lexed line %s' % str(self._res))
 		return self._res
 
 	def __init__(self, line):
+		self.count = classmethod(self.do_count())
+		self.lexxed = self.lex_line(line)
 		self.line = line
-		self.lexxed = self.lex_line(self.line)
-		self.lexxed.append((GamLine.TK_NWL, '\n'))
+		# cut off '\n'?
+		#self.line = line[:len(line)-1]
+
+	def __bool__(self):
+		return len(self.lexxed) > 0
 
 
 	def __str__(self):
 		return str(self.lexxed)
 
+	def __iter__(self):
+		yield from self.lexxed
+
+	def __get__(self, index):
+		return self.lexxed[index]
+
+
+class GamEXEComm:
+	def __init__(self, func, args, line):
+		self.func = func
+		self.args = args
+		self.line = line
+
+	def __call__(self, gs):
+		output=''
+		try:
+			DP('RUN %s' % str(self.line.line))
+			output += self.func(gs, self.args)
+			return output
+		except Exception as e:
+			raise BadGamError('runtime error: %s' % str(e))
+
+	def __str__(self):
+		return str(self.line.line)
+
+	def __repr__(self):
+		return 'EXE(%s)' % repr(self.line.line)
 
 class GamParser:
 	ST_NONE	= 1<<0
 	ST_GAM	= 1<<1
-	def state():
+	ALL_STATES = [ST_NONE, ST_GAM]
+
+	def state(self):
 		return self._state
 
-	def parse_st_str(self, st):
+	def set_st(self, st):
+		if st in GamParser.ALL_STATES:
+			DP('%s -> %s' % (self.state_str(), self.find_st_str(st)))
+			self._state = st
+			
+
+	def find_st_str(self, st):
 		return {
-			GamParser.ST_NONE : 'none',
-			GamParser.ST_GAM : 'gam'
-		}[st]
+			GamParser.ST_NONE:'[Parse State None]',
+			GamParser.ST_GAM: '[Parse State Gam]'
+				}.get(st, '[Parse State Unknown]')
+
+	def state_str(self):
+		return self.find_st_str(self._state)
 
 	def __init__(self):
-		self.input_history = []
-		self.state = GamParser.ST_NONE
-	
-	def parse(self, line):
-		self.input_history.append(line)
-		for tk, val in lines:
-			DP('PARSE tk=%s, val=%s' % (tk,val))
+		self._state = GamParser.ST_NONE
 
-	def addline(self, line):
-		self.lines = self.parse(line)
+	def ParseError(self, i, msg):
+		raise GamParseError(i, self.state(), \
+			self.state_str(), msg)
+
+	ARG_PARSE_FMT="""Invalid argument:
+\t\tAct:\t%s
+\t\tWant:\t%s
+\t\tGot:\t%s
+%s"""
+	def ArgParseError(self,i,  act, want, got, opt=''):
+		self.ParseError(i, GamParser.ARG_PARSE_FMT % (act, want, got, opt))
 	
+	def parse(self, line, i):
+		
+		def _tk(n, a):
+			if n > len(a) - 1:
+				return None
+			return a[n][0]
+
+		def _vl(n, a):
+			if n > len(a) - 1:
+				return None
+			return a[n][1]
+
+		def args_num_1opt(args, coersion, tn):
+			argc = len(args)
+			ac = _vl(0, args)
+			tk = _tk(1, args)
+			vl = _vl(1, args)
+
+			def E(want, msg):
+				nonlocal vl
+				got = str(vl)
+				self.ArgParseError(i, ac, want, got, opt=msg)
+
+			# only one optional arg now
+			if argc > 2:
+				E('0 or 1 args', '%d args\n' % argc)
+			elif argc == 1:
+				return []
+			elif argc == 2 and tk != GamLine.TK_NUM:
+				E('1 number', 'expected number\n')
+			# else argc == 2 
+
+			try:
+				return [coersion(vl)]
+			except TypeError:
+				E(tn, 'cannnot coerce to %s\n' % tn)
+
+		def args_int_1opt(args):
+			return args_num_1opt(args,
+				lambda x: int(x), 'int')
+
+		def args_float_1opt(args):
+			return args_num_1opt(args,
+				lambda x: float(x), 'float')
+
+		def args_gam(args):
+			return args_float_1opt(args)
+
+		def args_drop(args):
+			return args_int_1opt(args)
+
+		def args_warp(args):
+			return args_int_1opt(args)
+
+		def args_mag(args):
+			return []
+
+		def validate_gam_line(args):
+			argc = len(args)
+			ac = _vl(0, args)
+			tk1= _tk(1, args)
+			tk2= _tk(2, args)
+
+			def E(want, got, msg):
+				self.ArgParseError(i, ac, str(want), str(got), opt=msg)
+
+			if argc > 1 and tk1 != GamLine.TK_FSP:
+				E(classmethod(GamLine.find_tk_str(None, GamLine.TK_FSP)),
+					classmethod(GamLine.find_tk_str(None, tk1)),
+					'expected field separator (%s)'\
+						 % ':')
+
+			if argc > 2 and tk2 != GamLine.TK_TXT:
+				E(classmethod(GamLine.find_tk_str(None, GamLine.TK_TXT)),
+					classmethod(GamLine.find_tk_str(None, tk2)),
+					Gamline.tk_str(tk2),
+					'expected text')
+			
+
+		def args_const(args):
+			argc = len(args)
+			tk0= _tk(0, args)
+			tk1= _tk(1, args)
+			tk2= _tk(2, args)
+			tk3= _tk(3, args)
+			vl0= _vl(0, args)
+			vl1= _vl(1, args)
+			vl2= _vl(2, args)
+			vl3= _vl(3, args)
+
+			def E(want, got, msg):
+				self.ArgParseError(i, vl0, want, got, opt=msg)
+			if argc != 4:
+				E('4 args', '%d args' % argc, 'bad arity')
+			validate_gam_line(args)
+
+			if tk3 != GamLine.TK_TXT or tk3 != GamLine.TK_NUM:
+				E('text or number', Gamline.tk_str(tk3),
+					'expected text or number')
+
+			return [Gamnam(vl0, vl2), GamValConst(vl3)]
+
+		def o2(a, b):
+			return '%s\t%s\n' % (a,b)
+
+		def args_poly(args):
+			argc = len(args)
+			tk0= _tk(0, args)
+			tk1= _tk(1, args)
+			tk2= _tk(2, args)
+			tk3= _tk(3, args)
+			vl0= _vl(0, args)
+			vl1= _vl(1, args)
+			vl2= _vl(2, args)
+			vl3= _vl(3, args)
+
+			def E(want, got, msg):
+				self.ArgParseError(i, vl0, want, got, opt=msg)
+
+			if argc < 4:
+				E('4+ args', '%d args' % argc, 'bad arity')
+			validate_gam_line(args)
+
+			raw = ''.join([x[1] for x in args[3:]])
+			return [GamNam(vl0, vl2), GamValPoly(raw)]
+		
+		def delta_gam(gs, args):
+			if len(args) < 1:
+				ts = datetime.utcnow()
+				# hack to get start time in save:
+				gs.comms[gs.step_counter].line.line += ' ' + str(ts.timestamp())
+
+			else:
+				ts = datetime.fromtimestamp(args[0])
+			gs.stack_push('GAM')
+			gs.stack_push(ts)
+			return o2('GAM', ts)
+
+		def delta_drop(gs, args):
+			argc = len(args)
+			e=''
+			if argc == 0:
+				gs.drop(gs.step_counter)
+				e='ALL'
+			else:
+				gs.drop(args[0])
+				e=str(args[0])
+
+			return o2('DROP', e)
+
+		def delta_dump(gs, args):
+			# TODO
+			return  'DMP\n'
+
+		def delta_report(gs, args):
+			output = 'REPORT\n'
+
+			if gs.game is None:
+				return output + '\tno game loaded\n'
+
+			output += '\tt = %s\n' % gs.t()
+
+			# fixme, jank
+			for k in gs.game.schema:
+				p = gs.game.schema[k]
+				output += '\t%s <= %s\n' % \
+					(str(p[1].f(gs.t())), str(p[1]))
+			return output
+
+		def delta_warp(gs, args):
+			secs = float(args[0])
+			gs.warp(secs)
+			return 'WRP\t%s\n' % secs
+
+		def delta_mag(gs, args):
+			schema = {}
+			a, b = gs.stack_pop(), gs.stack_pop()
+			while b != 'GAM':
+				if gs.stack_empty():
+					raise ('mag: stack underflow')
+				
+				schema[b.nam] = (b,a)
+
+				a = gs.stack_pop()
+				b = gs.stack_pop()
+
+			gs.newgame(schema, a.timestamp())
+			return o2('MAG', a)
+						
+
+		def delta_const(gs, args):
+			gs.stack_push(args[0])
+			gs.stack_push(args[1])
+			return '  SET\t%s\tTO\t %s\n' % (str(args[0]), str(args[1]))
+
+		def delta_poly(gs, args):
+			gs.stack_push(args[0])
+			gs.stack_push(args[1])
+			return '  SET\t%s\tTO\t %s\n' % (str(args[0]), str(args[1]))
+
+		
+		state_map = {
+		# COMM	  ARS_VALID?	 DELTA FUNC	STATE CHANGE
+		GamParser.ST_NONE : {
+		'GAM': 	 (args_gam, 	delta_gam, 	GamParser.ST_GAM),
+		'DROP':  (args_drop,	delta_drop, 	None),
+		'DUMP':  (lambda x:[],	delta_dump, 	None),
+		'REPORT':(lambda x:[],	delta_report, 	None),
+		'WARP':	 (args_warp,	delta_warp, 	None)},
+		GamParser.ST_GAM : {
+		'MAG': 	 (lambda x:[],	delta_mag, 	GamParser.ST_NONE),
+		'CONST': (args_const,	delta_const,  	None),
+		'POLY':	 (args_poly,	delta_poly, 	None)}
+		}
+
+		#for tk, val in line:
+		#	DP('PARSE tk=%s, val="%s"' % (GamLine.TK_str[tk], val))
+
+		tbl = state_map.get(self.state(), None)
+			
+		if len(line.lexxed) > 0:
+			DP('lookup by (%s, %s)' % (self.state_str(), line.lexxed[0][1]))
+
+		if tbl:
+			act = line.lexxed[0][1].upper()
+			acts = tbl.get(act, None)
+			DP('found: %s' % str(acts))
+			if acts is None:
+				self.ParseError(i, 'Unknown act %s' % act)
+
+		else:
+			raise BadGamError('unknown state %s\n' % self.state())
+		args = acts[0](line.lexxed)
+		DP('args: %s' % args)
+		if acts[2]:
+			self.set_st(acts[2])
+		# success
+		return GamEXEComm(acts[1], args, line)
+
 
 # contents should be a list of GAME_LINE items
 class Gam:
-	def __init__(self, contents, user):
-		self.user = user
-		self.stamps = []
-		self.schema = {}
-		for c in contents:
-			assert_valid(GAME_LINE_re, c)
-
-			[a,b] = c.split(' ', 1)
-			i = GamNam(a)
-			d = { 
-				'poly' : GamValPoly,
-				'const' : GamValConst
-			}[i.typ](b)
-			self.schema[str(i)] = (i,d)
-
-	def timestamp(self):
-		return self.stamps[-1] if len(self.stamps) > 0 else None
-
-	def start(self, val):
-		DP('START GAME %s (on %s)' % (str(val), self._started_str(val)))
-		self.stamps.append(val)
+	def __init__(self, schema, ts):
+		self.schema = schema
+		self.timestamp = ts
+		DP('START GAME %s (on %s)' % (str(ts), self._started_str(ts)))
 
 	def get_t(self):
-		return datetime.utcnow().timestamp() - self.timestamp()
+		return datetime.utcnow().timestamp() - self.timestamp
 
 	def _started_str(self, timestamp):
 		return datetime.fromtimestamp(timestamp) \
@@ -440,245 +770,176 @@ class Gam:
 			if timestamp is not None else None
 
 	def started_str(self):
-		return self._started_str(self.timestamp())
+		return self._started_str(self.timestamp)
 
 	def __str__(self):
-		base='NEW GAME %s\n' % self.user
+		base +='START GAME\t%f (on %s)\n' % \
+			(self.stamp, self._started_str(self.stamp))
 		for k in self.schema:
 			(nam, val) = self.schema[k]
 			base +='\t%s %s\n' % (str(nam), str(val))
-		RE=''
-		for stamp in self.stamps[::-1]:
-			base +='%sSTART GAME\t%f (on %s)\n' % \
-				(RE, self.timestamp(), self._started_str(stamp))
-			RE='RE'
 		return base
 
 	def __repr__(self):
 		return repr({repr(k):repr(self.schema[k]) for k in self.schema})
 
 class GamSt:
-	def set_parse_st(self, st):
-		DP('parse state [%s -> %s]' % (self.parse_st_str(self.parse_st), self.parse_st_str(st)))
-		self.parse_st = st
-		self.parse_bf[self.parse_st] = []
+	def __init__(self, user):
+		self.user 		= user
+		self.parser 		= GamParser()
 
-	def get_parse_bf(self):
-		return self.parse_bf[self.parse_st]
+		self.game 		= None
+		self.valid 		= False
+		self.error 		= None
 
-	def append_parse_bf(self, item):
-		self.parse_bf[self.parse_st].append(item)
+		self.stack		= []
+		self.comms 		= []
+		self.step_counter 	= 0
+		self._warp 		= 0
+		self._drop		= 0
 
-	def loaded(self):
-		return self.game is not None
+	def warp(self, n):
+		self._warp += n
 
-	def started(self):
-		return self.loaded() and self.game.timestamp() is not None
+	def drop(self, n):
+		self._drop += n
 
-	ST_NONE	=1<<0
-	ST_GAM	=1<<1
-	def parse_st_str(self, st):
-		return {
-			GamSt.ST_NONE : 'none',
-			GamSt.ST_GAM : 'gam'
-		}[st]
+	def t(self):
+		if self.game is None:
+			return 0
+		return self.game.get_t() + self._warp
 
+	def stack_empty(self):
+		return len(self.stack) == 0
 
-	def __init__(self, lines, user):
-		self.valid = True
-		self.input_buffer = lines
-		self.history = []
-		self.user = user
-		self.game = None
-		self.parser = GamParser()
+	def stack_push(self, x):
+		self.stack = [x] + self.stack
 
-		self.step_counter = 0
-		self.parse_st = GamSt.ST_NONE
-		self.parse_bf = {}
+	def stack_pop(self):
+		if len(self.stack) == 0:
+			return None
+		x = self.stack[0]
+		del self.stack[0]
+		return x
 
-	
-
-	def comm_check(self, comm, regex, loaded=True):
-		if loaded and not self.loaded():
-			raise BadGamWarning('game not loaded')
-		assert_valid(regex, comm)
-			
-	def dispatch_game(self, comm):
-		self.set_parse_st(GamSt.ST_GAM)
-		return (True, 'start GAM block')
-
-	def attempt_load(self):
-		name = '%s.game' % self.user
-		header = 'LOAD'
-		try:
-			with open(name, 'r') as f:
-				self.input_buffer = f.read().splitlines() \
-					+ self.input_buffer
-			return '%s from %s\n' % (header, name)
-		except:
-			# there is prbably just no saved file
-			return '%s failed for %s\n' % (header, name)
-
-	def attempt_save(self):
-		name = '%s.game' % self.user
-		header = 'SAVE'
-		try:
-			with open(name, 'w') as f:
-				for line in self.history:
-					print(line, file=f)
-			return '%s to %s' % (header, name)
-		except:
-			return '%s failed for %s\n' % (header, name)
-
-	
-	def dispatch_drop(self, comm):
-		name = '%s.game' % self.user
-
-		if len(comm) > 1:
-			try:
-				num = int(comm[1])
-			except ValueError:
-				num = 0
-		else:
-			num = 0
-
-		i=0
-		while i < num and i < len(self.history):
-			del self.history[i]
-		self.attempt_save()
-		return (True, 'delete %d items from history' % num)
-			
+	def newgame(self, schema, timestamp):
+		self.game = Gam(schema, timestamp)
 		
-
-	def dispatch_dump(self, comm):
-		return (True, '%s.game dump:\n%s' % (self.user, '\n'.join(self.history)))
-
-	REPORT_FORM="""REPORT:
-\tt=%(t)s
-"""
-
-	def dispatch_report(self, comm):
-
-		message = GamSt.REPORT_FORM % { 't' : self.game.get_t() }
-
-		for k in self.game.schema:
-			p = self.game.schema[k]
-			message += '\t%s=%s\n' % (str(nam), str(p[1]))
-
-		return (True, message)
-
-	def dispatch_warp(self, comm):
-		if len(comm) > 1:
-			try:
-				time = int(comm[1])
-			except ValueError:
-				time = 0
-		else:
-			time = 0
-		self.game.start(self.game.timestamp() - time)
-		return (True, 'game warped %d seconds' % time)	
-
-	def dispatch_default(self, comm):
-		return (False, 'default dispatch called for comm %s' % comm)
-
-	def newgame(self, gam):
-		self.game = gam
-		self.game.start(datetime.utcnow().timestamp())
-		
-	def dispatch_st_none(self, line):
-		assert_valid(COMM_ST_NONE_re, line)
-		# all top level commands start with X and a space for now
-		comm = line.split(' ')
-		dispatch = {
-			# COMM		HANDLER		VALIDATION	MUST BE PLAYING
-			'GAM': 	 (self.dispatch_game, 	GAME_re, 	False),
-			'DROP':  (self.dispatch_drop, 	DROP_re, 	False),
-			'DUMP':  (self.dispatch_dump, 	DUMP_re, 	True),
-			'REPORT':(self.dispatch_report, REPORT_LINE_re, True),
-			'WARP':	 (self.dispatch_warp, 	WARP_LINE_re, 	True),
-		}.get(comm[0].upper(), (self.dispatch_default, '.*',	False))
-
-		self.comm_check(line, dispatch[1], loaded=dispatch[2])
-		return dispatch[0](comm)
-				
-	def dispatch_st_gam(self, line):
-		assert_valid(COMM_ST_GAM_re, line)
-		if re.search(MAG_re, line) is None:
-			self.append_parse_bf(line)
-			return (True, 'add "%s" to ST_GAM buffer' % line)
-		self.set_parse_st(GamSt.ST_NONE)
-		try:
-			self.newgame(Gam(self.get_parse_bf(), self.user))
-			return (True, 'new game started for user "%s"' % self.user)
-		except BadGamWarning as e:
-			return (True, 'newgame() warn: %s' % str(e))
-		except Exception as e:
-			return (False, 'newgame() error: %s' % str(e))
-
-	def dispatch_input_line(self, line):
-		assert_valid(COMM_re, line)
-		if self.parse_st == GamSt.ST_NONE:
-			return self.dispatch_st_none(line)
-		elif self.parse_st == GamSt.ST_GAM:
-			return self.dispatch_st_gam(line)
-		else:
-			return (False, 'mysterious parse state')
-
 	def invalidate(self):
 		self.valid = False
 
-	def is_valid(self):
-		return self.valid
 
 	def run_step(self):
-		next_line = self.input_buffer[0]
+		comm = self.comms[self.step_counter]
+		output=''
+		DP('==[Step %03d]===========\n%s\n%s' % \
+			(self.step_counter, comm.line,
+		   '======================='))
 		try:
-			# lex next line
-			line = GamLine(next_line)
-			#(success, message) = self.dispatch_input_line(line)
-			(success, message) = (len(line.lexxed) > 1, str(line.lexxed))
-		except BadGamWarning as e:
-			line = None
-			(success, message) = (True, 'run_step() warning: %s' % str(e))
-		except Exception as e:
-			line = None
-			(success, message) = (False, 'run_step() error: %s' % str(e))
-			self.invalidate()
-
-		# include newline added
-		if line and len(line.lexxed) < 2:
-			# skip empty lines
-			output = '# skip empty line\n'
-		else:
-			output='[%d] RUN %s\n' % (self.step_counter, next_line)
+			output += '[%d]\t%s' % (self.step_counter,
+				# Now we actually run the step
+				comm(self)
+			)
 			self.step_counter += 1
-		
-		output += message + '\n'
+			# only incremented on success
+		except Exception as e:
+			output += 'exception: %s\n' % str(e)
+			output += 'stack: %s\n' % self.stack
+			tb = traceback.format_exc()
+			output += '%s\n' % str(tb)
+			self.error = e
+
 		DP(output)
 
-		
-		if success:
-			self.history.append(next_line)
-			if line.lexxed[0][1] == 'DROP':
-				DP('in DROP!')
-				self.dispatch_drop(['DROP', '100'])
-			
-		del self.input_buffer[0]
 		return output
 
-	def has_input(self):
-		return len(self.input_buffer) > 0
+	def is_valid(self):
+		return self.error is None
+
+	def history(self):
+		d = max(self.step_counter - self._drop, 0)
+		DP('HISTORY: %d - %d, comms=%s' % (self.step_counter,\
+			self._drop, str(self.comms)))
+		return [c.line.line for c in self.comms[:d]] 
+
+	def has_comms(self):
+		return len(self.comms) > self.step_counter
 	
 	def ready(self):
-		return self.has_input() and self.is_valid()
+		return self.has_comms() and self.is_valid()
 
-def run_game(input_lines, user):
-	game_state = GamSt(input_lines, user)
+	def header(self):
+		return 'START GAME %s\n' % VERSION
 
-	output = game_state.attempt_load()
-	while game_state.ready():
-		output += game_state.run_step()
-	output += game_state.attempt_save()
+	def lexx_parse(self, l):
+		n = len(self.comms)
+		output = '(%d)\tPARSE\t%s\n' % (n, l)
+		try:
+			l = GamLine(l)
+			if l:
+				c = self.parser.parse(l, n)
+				self.comms.append(c)
+		except GamError as e:
+			DP('GamError raised! str = [%s]' % str(e))
+			output += str(e)
+			self.error = e
+		except Exception as e:
+			output += 'exception: %s\n' % str(e)
+			output += '(in parse)\n'
+			tb = traceback.format_exc()
+			output += '%s\n' % str(tb)
+			self.error = e
+
+		return output
+
+def do_load(u, n, ls=None):
+	n = '%s.game' % u
+	with open(n, 'r') as f:
+		return f.readlines()
+
+def do_save(u, n, ls):
+	with open(n, 'w') as f:
+		for l in ls:
+			print(l, file=f)
+
+def attempt_fop(do, ls, u, m, f):
+	n = '%s.game' % u
+	try:
+		return ('%s %s\n' % (m, n), do(u, n, ls=ls))
+	except FileNotFoundError:
+		return ('%s %s\n' % (f, n), [])
+
+def attempt_load(u):
+	return attempt_fop(do_load, None, u,
+		'LOAD from ', 'FAIL read from')
+
+def attempt_save(ls, u):
+	return attempt_fop(do_save, ls, u,
+		'SAVE to', 'FAIL write to')
+
+def run_game(user_lines, user):
+	gs = GamSt(user)
+
+	output = gs.header()
+	
+	msg, saved_lines = attempt_load(user)
+	output += msg
+	input_lines = saved_lines + user_lines
+
+	for l in input_lines:
+		out_pre=''
+		out_pre += gs.lexx_parse(l)
+		if gs.error is not None:
+			output += out_pre
+			break
+
+	while gs.ready():
+		output += gs.run_step()
+	
+	if gs.is_valid():
+		h = gs.history()
+		output += 'History:\n%s\n' % str(h)
+		output += attempt_save(h, user)[0]
 
 	return output
 
@@ -738,7 +999,7 @@ def handle_game(env, SR):
 """ % { 'output' : process_req_body(req_body, user) }
 
 
-	msgs = [('user', user), ('version', APPLICATION + " " + VERSION), ('body', req_body)]
+	msgs = [('user', user), ('appver', appver()), ('body', req_body)]
 
 	return generate_html(base, msgs, env, SR)
 
@@ -753,7 +1014,7 @@ def handle_US(env, SR):
 		"| Dogecoin price: %s </marquee>") % \
 		(generate_price(5), generate_price(3), generate_price(1), generate_price(2))
 
-	msgs = [('user', user), ('version', APPLICATION + " " + VERSION)]
+	msgs = [('user', user), ('appver', appver())]
 
 	return generate_html(base, msgs, env, SR)
 
