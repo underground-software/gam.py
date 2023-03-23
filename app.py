@@ -569,7 +569,7 @@ class GamParser:
 
 			try:
 				return [coersion(vl)]
-			except TypeError:
+			except (TypeError, ValueError):
 				E(tn, 'cannnot coerce to %s\n' % tn)
 
 		def args_num_1opt(args, coersion, tn, opt=True):
@@ -810,7 +810,7 @@ class Gam:
 
 	def report(self):
 		output = o3('nam(f)', 'f(t)', 'f', pre='\t')
-		output += o2('t', self.t(), sep=' = ', pre='\t')
+		output += o3('t', self.t(), '', pre='\t')
 		for k in self.schema:
 			pair = self.schema[k]
 			output += o3(k, str(pair[1].f(self.t())),
@@ -1032,18 +1032,15 @@ def handle_game(env, SR):
 <br />
 
 <div class="game_input">
-<form method="post" class="fast_game_input"> <div class="fast_game_input">
-	<label for="in">Fast Input</label>
+<div class="fast_game_input"><form method="post" class="fast_game_input">
 	<input type="text" class="fast_game_input" name="in" autofocus />
-	<br />
-	<button type="submit">Submit</button>
-</div></form>
-<form method="post" class="multi_game_input"> <div class="multi_game_input">
-	<label for="in">Input</label>
+	<button type="submit">Run</button>
+</form></div>
+<div class="multi_game_input"><form method="post" class="multi_game_input">
 	<textarea class="multi_game_input" name="in"></textarea>
 	<br />
 	<button type="submit">Submit</button>
-</div></form>
+</form></div>
 </div>
 """ % { 'output' : process_req_body(req_body, user) }
 

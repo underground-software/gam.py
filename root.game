@@ -1,3 +1,13 @@
-drop
-
-gam 1679489707.094764
+REPORT
+report
+report
+report
+report
+warp 3
+warp 200
+report
+REPORT
+GAM 1679539753.934317
+poly:foo 100:0/100:0
+MAG
+DUMP
