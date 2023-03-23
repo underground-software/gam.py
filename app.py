@@ -202,6 +202,25 @@ class GamLexxError(GamError):
 	def __str__(self):
 		return super().__str__()
 
+class GamException(GamError):
+	def __init__(self, gs, msg):
+		self.gs = gs
+		self.n = gs.step_counter
+		self.c = gs.comms[self.n]
+		self.s = gs.stack
+		super().__init__(n=self.n, st=len(self.s),\
+			st_str=self.c.line.line,\
+			h='Runtime Exception:', m=msg)
+
+	def string(self):
+		output = super().__str__()
+		output += 'stack: %s\n' % str(self.s)
+		#tb = traceback.format_exc()
+		#output += '%s\n' % str(tb)
+		output += '======[NOT SAVED]======\n'
+		return output
+		
+
 
 class GamNam:
 	def __init__(self, typ, nam):
@@ -249,7 +268,7 @@ class GamValPoly(GamVal):
 			total += p[0] * (t ** p[1])
 			DP('POLY TERM %g = %g * t ^ %g' % (total, p[0], p[1]))
 		
-		return total
+		return '%g' % total
 
 	def __str__(self):
 		return 'f(t) = %s' % self._str('(%g)*t^(%g)%s', ' + ')
@@ -490,12 +509,10 @@ class GamEXEComm:
 
 	def __call__(self, gs):
 		output=''
-		try:
-			DP('RUN %s' % str(self.line.line))
-			output += self.func(gs, self.args)
-			return output
-		except Exception as e:
-			raise BadGamError('runtime error: %s' % str(e))
+		output += self.func(gs, self.args)
+		DP('RUN %s' % str(self.line.line))
+
+		return output
 
 	def __str__(self):
 		return str(self.line.line)
@@ -691,15 +708,15 @@ class GamParser:
 		
 		def delta_gam(gs, args):
 			if len(args) < 1:
-				ts = datetime.utcnow()
+				ts_dt = datetime.utcnow()
 				# hack to get start time in save:
-				gs.comms[gs.step_counter].line.line += ' ' + str(ts.timestamp())
-
+				gs.comms[gs.step_counter].line.line += \
+					' ' + str(ts_dt.timestamp())
 			else:
-				ts = datetime.fromtimestamp(args[0])
+				ts_dt = ts_to_dt(args[0])
 			gs.stack_push('GAM')
-			gs.stack_push(ts)
-			return o2('GAM', ts)
+			gs.stack_push(ts_dt)
+			return o2('GAM', ts_dt)
 
 		def delta_drop(gs, args):
 			argc = len(args)
@@ -730,11 +747,19 @@ class GamParser:
 			return output
 
 		def delta_report(gs, args):
-			output = 'REPORT\n'
+			argc = len(args)
+			now = datetime.utcnow().timestamp()
+			ts = args[0] if argc > 0 else now
+			output = o2('REPORT', '%s' % dt_str(ts_to_dt(ts)))
 
 			if gs.game is None:
-				return output + '\tno game loaded\n'
-			output += gs.report()
+				return '%s\tno game loaded\n' % output
+
+			if argc == 0: # save for re-run of this report command
+				gs.comms[gs.step_counter].line.line += ' ' + str(ts)
+
+			output += gs.report(ts)
+
 			return output
 
 		def delta_warp(gs, args):
@@ -747,28 +772,25 @@ class GamParser:
 			a, b = gs.stack_pop(), gs.stack_pop()
 			while b != 'GAM':
 				if len(gs.stack) < 2:
-					# TODO
-					raise BadGamError('mag: stack underflow')
+					raise GamException(gs, 'stack underflow')
 				
 				schema += [(b, a)]
 
 				a = gs.stack_pop()
 				b = gs.stack_pop()
-
-			gs.game = Gam(schema, a.timestamp())
+			try:
+				gs.game = Gam(schema, a.timestamp())
+			except BadGamError as e:
+				raise GamException(gs, msg=str(e))
 		
 			return o2('MAG', a)
 						
-
-		def delta_const(gs, args):
+		def delta_gamdata(gs, args):
 			gs.stack_push(args[0])
 			gs.stack_push(args[1])
-			return 'SET\t%s\tTO\t %s\n' % (str(args[0]), str(args[1]))
-
-		def delta_poly(gs, args):
-			gs.stack_push(args[0])
-			gs.stack_push(args[1])
-			return 'SET\t%s\tTO\t %s\n' % (str(args[0]), str(args[1]))
+			#return 'SET\t%s\tTO\t %s\n' % (str(args[0]), str(args[1]))
+			return o3(str(args[0]), 'TO',
+				  str(args[1]), pre='SET\t')
 
 		
 		state_map = {
@@ -777,14 +799,14 @@ class GamParser:
 		'GAM': 	 (args_float_1opt, 	delta_gam, 	GamParser.ST_GAM),
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
-		'REPORT':(args_int_1opt,	delta_report, 	None),
+		'REPORT':(args_float_1opt,	delta_report, 	None),
 		'WARP':	 (args_int_1,		delta_warp, 	None)},
 		GamParser.ST_GAM : {
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
 		'MAG': 	 (lambda x:[],		delta_mag, 	GamParser.ST_NONE),
-		'CONST': (args_const,		delta_const,  	None),
-		'POLY':	 (args_poly,		delta_poly, 	None)}
+		'CONST': (args_const,		delta_gamdata, 	None),
+		'POLY':	 (args_poly,		delta_gamdata, 	None)}
 		}
 
 		# get map of valid acts for current state
@@ -808,6 +830,12 @@ class GamParser:
 		return GamEXEComm(acts[1], args, line)
 
 
+def dt_str(dt):
+	return dt.strftime('%a, %d %b %Y %H:%M:%S GMT')
+	
+def ts_to_dt(ts):
+	return datetime.fromtimestamp(ts)
+
 class Gam:
 	def __init__(self, schema, ts):
 		# inut schema is list of (GamNam, GamVal) pairs
@@ -815,30 +843,35 @@ class Gam:
 		self.schema = {}
 		for nam, val in schema:
 			if str(nam) in self.schema.keys():
-					raise GamParseError(msg='name collision: "%s"' % str(nam))
+				raise BadGamError('name collision: "%s"' % str(nam))
 			self.schema[str(nam)] = (nam, val)
 		self.timestamp = ts
 		DP('START GAME %s (on %s)' % (str(ts), self._started_str(ts)))
 
-	def t(self):
-		return datetime.utcnow().timestamp() - self.timestamp
+	def t(self, t=None):
+		return datetime.utcnow().timestamp() - self.timestamp \
+			if t is None else t - self.timestamp
 
-	def _started_str(self, timestamp):
-		return datetime.fromtimestamp(timestamp) \
-			.strftime('%a, %d %b %Y %H:%M:%S GMT') \
-			if timestamp is not None else None
+	def _started_str(self, ts):
+		return dt_str(ts_to_dt(ts)) if ts is not None else None
 
 	def started_str(self):
 		return self._started_str(self.timestamp)
 
-	def report(self):
-		output = o3('nam(f)', 'f(t)', 'f', pre='\t')
-		output += o3('t', self.t(), '', pre='\t')
+	def report(self, ts, warp=0):
+		t = self.t(ts + warp)
+		_t = self.t(ts) # _t is no no warp
+
+		t_str = '%.2f' % t
+		_t_str = '%.2f' % _t
+
+		output  = o3('nam(f)', 'f(t)', 	'f', 	pre='\t')
+		output += o3('t', 	t_str, 	'', 	pre='\t')
+		output += o3('_t', 	_t_str, '', 	pre='\t')
 		for k in self.schema:
 			pair = self.schema[k]
-			output += o3(k, str(pair[1].f(self.t())),
-				str(pair[1]), pre='\t')
- 
+			output += o3(k, str(pair[1].f(t)),
+					str(pair[1]),   pre='\t')
 		return output
 
 	def __repr__(self):
@@ -868,6 +901,7 @@ class GamSt:
 	def drop(self, n):
 		self._drop += n
 
+	# effective time is (game.t + warp)
 	def t(self):
 		if self.game is None:
 			return 0
@@ -903,11 +937,8 @@ class GamSt:
 			)
 			self.step_counter += 1
 			# only incremented on success
-		except Exception as e:
-			output += 'exception: %s\n' % str(e)
-			output += 'stack: %s\n' % str(self.stack)
-			tb = traceback.format_exc()
-			output += '%s\n' % str(tb)
+		except GamException as e:
+			output += '%s\n' % e.string()
 			self.error = e
 
 		DP(output)
@@ -925,8 +956,8 @@ class GamSt:
 			s = d - n
 		return [c.line.line for c in self.comms[s:d]] 
 	
-	def report(self):
-		return self.game.report() if self.game is not None else None
+	def report(self, ts):
+		return self.game.report(ts, self._warp) if self.game is not None else None
 
 	def has_comms(self):
 		return len(self.comms) > self.step_counter
