@@ -3,9 +3,33 @@ from urllib.parse import parse_qs
 from datetime import datetime
 import traceback
 
-KDLP_URLBASE='/var/www/html/kdlp.underground.software/'
+from config import PREPEND
 VERSION="0.1"
 APPLICATION="mars"
+
+GAME_HTML="""
+<form class="game_output" class="game_output">
+	<label for="out">Output</label>
+	<textarea id="game_output" class="game_output" name="out" readonly>%(output)s</textarea>
+</form>
+	<script type="text/javascript">
+		var TA = document.getElementById('game_output')
+		TA.scrollTop = TA.scrollHeight
+	</script>
+<br />
+
+<div class="game_input">
+<div class="fast_game_input"><form method="post" class="fast_game_input">
+	<input type="text" class="fast_game_input" name="in" autofocus />
+	<button type="submit">Run</button>
+</form></div>
+<div class="multi_game_input"><form method="post" class="multi_game_input">
+	<textarea class="multi_game_input" name="in"></textarea>
+	<br />
+	<button type="submit">Submit</button>
+</form></div>
+</div>
+"""
 
 def DP(strg):
 	print(strg, file=sys.stderr)
@@ -34,11 +58,9 @@ def notfound_html(doc, SR):
 
 def generate_html(doc, msgs, env, SR):
 	head = ''
-
-	with open(KDLP_URLBASE + 'header', 'r') as f:
-		head += f.read()
-	with open(KDLP_URLBASE + 'nav_us', 'r') as f:
-		head += f.read()
+	for n in PREPEND:
+		with open(n, 'r') as f:
+			head += f.read()
 
 	page = head + doc + messageblock(msgs)
 
@@ -1018,32 +1040,7 @@ def handle_game(env, SR):
 	if is_post_req(env):
 		req_body = html.escape(str(env['wsgi.input'].read(req_body_size), "UTF-8"))
 
-
-
-	base = """
-<form class="game_output" class="game_output">
-	<label for="out">Output</label>
-	<textarea id="game_output" class="game_output" name="out" readonly>%(output)s</textarea>
-</form>
-	<script type="text/javascript">
-		var TA = document.getElementById('game_output')
-		TA.scrollTop = TA.scrollHeight
-	</script>
-<br />
-
-<div class="game_input">
-<div class="fast_game_input"><form method="post" class="fast_game_input">
-	<input type="text" class="fast_game_input" name="in" autofocus />
-	<button type="submit">Run</button>
-</form></div>
-<div class="multi_game_input"><form method="post" class="multi_game_input">
-	<textarea class="multi_game_input" name="in"></textarea>
-	<br />
-	<button type="submit">Submit</button>
-</form></div>
-</div>
-""" % { 'output' : process_req_body(req_body, user) }
-
+	base = GAME_HTML % { 'output' : process_req_body(req_body, user) }
 
 	msgs = [('user', user), ('appver', appver()), ('body', req_body)]
 
@@ -1052,8 +1049,7 @@ def handle_game(env, SR):
 def handle_US(env, SR):
 	user = get_authorized_user(env)
 
-	base = \
-		("<marquee>Underground Software Home " + \
+	base = ("<marquee>Underground Software Home " + \
 		"| Bitcoin price: %s " + \
 		"| Litecoin price: %s " + \
 		"| Ethereum price: %s " + \
