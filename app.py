@@ -5,7 +5,7 @@ import traceback
 
 from config import PREPEND
 
-VERSION="0.1.0"
+VERSION="0.1"
 APPLICATION="mars"
 
 GAME_HTML="""
