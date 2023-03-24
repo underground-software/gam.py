@@ -1,4 +1,5 @@
 import random, html, sys, re, os, traceback, requests, subprocess
+from urllib.parse import parse_qs
 from datetime import datetime
 from http import cookies
 from math import log
@@ -157,11 +158,11 @@ NUM_re		='[0-9]+\.?[0-9]*'
 POLY_re		='(%s:%s\/?)+' 	% (NUM_re, NUM_re)
 CONST_re 	='[_0-9a-zA-Z ]+'
 VAL_re 		='(%s|%s)' 	% (POLY_re, CONST_re)
-TYPE_IDENT_re	='%s:%s'	% (TYPE_re, IDENT_re)
+TYPE_IDENT_re	='%s\w*%s'	% (TYPE_re, IDENT_re)
 GAME_re		='GAM.*'
 DROP_re		='DROP\W*(%s)?' % (NUM_re)
 DUMP_re		='DUMP.*'
-MAG_re		='MAG.*'	
+MAG_re		='GAM.*'	
 GAME_LINE_re	='%s %s'	% (TYPE_IDENT_re, VAL_re)
 START_LINE_re	='START\W*(%s)?'% (NUM_re)
 WARP_LINE_re	='WARP\W*(%s)?'	% (NUM_re)
@@ -173,10 +174,12 @@ COMM_re		='(%s|%s)'	% (COMM_ST_NONE_re, COMM_ST_GAM_re)
 def just(reg):
 	return '^%s$' % reg
 
-def assert_valid(rex, data):
+def assert_valid(E, rex, data, info=''):
 	DP('GAM validate %s by regex %s' % (data, rex))
+	if info != '':
+		info += ' '
 	if re.search(just(rex), data) is None:
-		raise GamParseError(msg='data "%s" failed regex "%s"' % (data, rex))
+		E('%sargument matching %s' % (info, rex), '%s' % data, 'Invalid value')
 
 class BadGamWarning(Exception):
 	pass
@@ -209,7 +212,13 @@ class GamError(Exception):
 class GamParseError(GamError):
 	PARSE_HEADER='Parse Error:'
 
-	def __init__(self, msg='undefined parse error', n=-1, st=-1, st_str='?'):
+	def __init__(self, msg='undefined parse error', n=-1, st=-1, st_str='?', tbl=None):
+		if tbl:
+			opt = '\npossible acts in %s:\n' % st_str
+			for k in tbl:
+				opt += '  %s' % k
+			msg += opt
+
 		super().__init__(n=n, st=st, st_str=st_str, \
 			h=GamParseError.PARSE_HEADER, m=msg)
 
@@ -248,7 +257,8 @@ class GamException(GamError):
 
 
 class GamNam:
-	def __init__(self, typ, nam):
+	def __init__(self, E, typ, nam):
+		assert_valid(E, TYPE_IDENT_re, '%s %s' % (typ, nam))
 		self.typ = typ
 		self.nam = nam
 
@@ -263,15 +273,13 @@ class GamNam:
 
 # doesn't do anything by itself: parent to other value types
 class GamVal:
-	def __init__(self, val):
-		assert_valid(VAL_re, val)
+	def __init__(self, E, val):
+		assert_valid(E, VAL_re, val, info='Generic Val')
 
 class GamValPoly(GamVal):
-	def __init__(self, val):
-		super().__init__(val)
-		assert_valid(POLY_re, val)
-		
-		DP(str(val))
+	def __init__(self, E, val):
+		super().__init__(E, val)
+		assert_valid(E, POLY_re, val, info='Polynomial')
 		pairs_raw = val.split('/')
 		self.pairs = [(float(pair[0]), float(pair[1])) \
 			for pair in [pair_raw.split(':') \
@@ -298,16 +306,15 @@ class GamValPoly(GamVal):
 			return 'overflow'
 
 	def __str__(self):
-		return 'f(t) = %s' % self._str('(%g)*t^(%g)%s', ' + ')
+		return 'f(t+w) = %s' % self._str('(%g)*t^(%g)%s', ' + ')
 
 	def __repr__(self):
 		return 'GamValPoly([%s])' % self._str('("%g","%g")%s', ',')
 
 class GamValConst(GamVal):
-	def __init__(self, val):
-		super().__init__(val)
-		assert_valid(CONST_re, val)
-				
+	def __init__(self, E, val):
+		super().__init__(E, val)
+		assert_valid(E, CONST_re, val, info='Constant')
 		self.val = val
 
 	def f(self, t):
@@ -338,10 +345,17 @@ class GamLine:
 	CH_QUT=1<<7	# quote (")
 	CH_COM=1<<8	# comma (,)
 	CH_BNG=1<<9	# exclamation point, aka bang (!)
-	CH_DSH=1<<10	# comma (-
-	CH_NIL=1<<11	# GamLine.NULL
+	CH_DSH=1<<10	# comma (,)
+	CH_RAN=1<<11	# right angle bracket (>)
+	CH_LAN=1<<12	# left angle backet (<)
+	CH_RSQ=1<<13	# right square bracket (])
+	CH_LSQ=1<<14	# left square backet ([)
+	CH_AAT=1<<15	# at symbol (@)
+	CH_NIL=1<<16	# GamLine.NULL
+	CH_SCL=1<<17	# semicolon (;)
 	# consider , and  ! to be part of string text input domain
-	CH_TXT=CH_ALP + CH_COM + CH_BNG
+	CH_TXT=CH_ALP + CH_COM + CH_BNG + CH_RAN + CH_LAN + CH_RSQ + CH_LSQ \
+		      + CH_SCL
 	CH_NUM=CH_DIG
 	# dash only valid at start of number
 	CH_SNM=CH_NUM + CH_DSH
@@ -377,6 +391,18 @@ class GamLine:
 			return GamLine.CH_BNG
 		elif char == '-':
 			return GamLine.CH_DSH
+		elif char == '>':
+			return GamLine.CH_RAN
+		elif char == '<':
+			return GamLine.CH_LAN
+		elif char == ']':
+			return GamLine.CH_RSQ
+		elif char == '[':
+			return GamLine.CH_LSQ
+		elif char == '@':
+			return GamLine.CH_AAT
+		elif char == ';':
+			return GamLine.CH_SCL
 		elif char == GamLine.NULL:
 			return GamLine.CH_NIL
 		else:
@@ -535,8 +561,6 @@ class GamLine:
 		self.count = GamLine.do_count()
 		self.lexxed = self.lex_line(line)
 		self.line = line
-		# cut off '\n'?
-		#self.line = line[:len(line)-1]
 
 	def __bool__(self):
 		return len(self.lexxed) > 0
@@ -582,7 +606,9 @@ class GamParser:
 	ST_NONE	= 1<<0
 	ST_GAM	= 1<<1
 	ST_ARG	= 1<<2
-	ALL_STATES = [ST_NONE, ST_GAM, ST_ARG]
+	ST_EOF	= 1<<3
+	ST_ADD	= 1<<4
+	ALL_STATES = [ST_NONE, ST_GAM, ST_ARG, ST_EOF, ST_ADD]
 
 	def state(self):
 		return self._state
@@ -597,7 +623,9 @@ class GamParser:
 		return {
 			GamParser.ST_NONE:'[Parse State None]',
 			GamParser.ST_GAM: '[Parse State Gam]',
-			GamParser.ST_ARG: '[Parse State Arg]'
+			GamParser.ST_ARG: '[Parse State Arg]',
+			GamParser.ST_EOF: '[Parse State EOF]',
+			GamParser.ST_ADD: '[Parse State Add]'
 				}.get(st, '[Parse State Unknown]')
 
 	def state_str(self):
@@ -606,9 +634,9 @@ class GamParser:
 	def __init__(self):
 		self._state = GamParser.ST_NONE
 
-	def ParseError(self, i, msg):
+	def ParseError(self, i, msg, tbl=None):
 		raise GamParseError(n=i, st=self.state(), \
-			st_str=self.state_str(), msg=msg)
+			st_str=self.state_str(), msg=msg, tbl=tbl)
 
 	ARG_PARSE_FMT="""Invalid argument:
 \t\tAct:\t%s
@@ -718,6 +746,11 @@ class GamParser:
 			return args_num_1(args,
 				lambda x: float(x), 'float', opt=False)
 
+		def args_txt_or_num1(args):
+			if len(args) > 1:
+				args[1] = (GamLine.TK_TXT, str(args[1][1]))
+			return args_txt_1(args)
+
 		def args_gam(args):
 			return args_float_1opt(args)
 
@@ -739,15 +772,10 @@ class GamParser:
 			def E(want, got, msg):
 				self.ArgParseError(i, ac, str(want), str(got), opt=msg)
 
-			if argc > 1 and tk1 != GamLine.TK_FSP:
-				E(GamLine.find_tk_str(GamLine.TK_FSP),
-					GamLine.find_tk_str(tk1),
-					'expected field separator (%s)'\
-						 % ':')
 
-			if argc > 2 and tk2 != GamLine.TK_TXT:
+			if argc > 1 and tk1 != GamLine.TK_TXT:
 				E(GamLine.find_tk_str(GamLine.TK_TXT),
-					GamLinefind_tk_str(tk2),
+					GamLine.find_tk_str(tk2),
 					'expected text')
 			
 
@@ -764,15 +792,15 @@ class GamParser:
 
 			def E(want, got, msg):
 				self.ArgParseError(i, vl0, want, got, opt=msg)
-			if argc != 4:
-				E('4 args', '%d args' % argc, 'bad arity')
+			if argc != 3:
+				E('3 args', '%d args' % argc, 'bad arity')
 			validate_gam_line(args)
 
 			if tk3 != GamLine.TK_TXT and tk3 != GamLine.TK_NUM:
 				E('text or number', GamLine.find_tk_str(tk3),
 					'expected text or number')
 
-			return [GamNam(vl0, vl2), GamValConst(vl3)]
+			return [GamNam(E, vl0, vl1), GamValConst(E, vl2)]
 
 
 		def args_poly(args):
@@ -789,12 +817,12 @@ class GamParser:
 			def E(want, got, msg):
 				self.ArgParseError(i, vl0, want, got, opt=msg)
 
-			if argc < 4:
-				E('4+ args', '%d args' % argc, 'bad arity')
+			if argc < 3:
+				E('3+ args', '%d args' % argc, 'bad arity')
 			validate_gam_line(args)
 
-			raw = ''.join([x[1] for x in args[3:]])
-			return [GamNam(vl0, vl2), GamValPoly(raw)]
+			raw = ''.join([x[1] for x in args[2:]])
+			return [GamNam(E, vl0, vl1), GamValPoly(E, raw)]
 
 		
 		def delta_gam(gs, args):
@@ -808,6 +836,11 @@ class GamParser:
 			gs.stack_push('GAM')
 			gs.stack_push(ts_dt)
 			return o2('GAM', ts_dt)
+
+		def delta_add(gs, args):
+			gs.stack_push('ADD')
+			gs.stack_push(None) # keep pushing 2 things at once
+			return o2('ADD', ts_dt)
 
 		def delta_drop(gs, args):
 			argc = len(args)
@@ -868,14 +901,27 @@ class GamParser:
 			a, b = stack_pop_two(gs)
 			while b != 'GAM':
 				schema += [(b, a)]
-
 				a, b = stack_pop_two(gs)
 			try:
 				gs.game = Gam(schema, a.timestamp())
+				gs._warp = 0
 			except BadGamError as e:
 				raise GamException(gs, msg=str(e))
 		
-			return o2('MAG', a)
+			return o2('START', a)
+
+		def delta_dda(gs, args):
+			schema = []
+			a, b = stack_pop_two(gs)
+			while b != 'ADD':
+				schema += [(b, a)]
+				a, b = stack_pop_two(gs)
+			try:
+				gs.game.append(schema, a.timestamp())
+			except BadGamError as e:
+				raise GamException(gs, msg=str(e))
+		
+			return o2('ADDED', a)
 
 		def delta_shfail(gs, args):
 			sh = args[0]
@@ -900,7 +946,7 @@ class GamParser:
 			a, b = stack_pop_two(gs)
 			args = []
 			while b != 'SH':
-				args += [str(a)]
+				args = [str(a)] + args
 				a, b = stack_pop_two(gs)
 				
 			output = o3('RUN', a, args)
@@ -921,11 +967,27 @@ class GamParser:
 			return o3(str(args[0]), 'TO',
 				  str(args[1]), pre='SET\t')
 
+		def delta_eof(gs, args):
+			DP('entering EOF mode')
+			gs.quiet = True
+			return '\n--- plain text ---\n'
+
+		def delta_foe(gs, args):
+			DP('exiting EOF mode')
+			gs.quiet = False
+			return '---  end text  ---\n'
+
+		def delta_echo(gs, args):
+			return gs.comms[gs.step_counter].line.lexxed[0][1] + '\n' \
+				if len(gs.comms[gs.step_counter].line.lexxed[0][1]) > 0 \
+				else '\n'
 		
 		state_map = {
 		# ACT 	 PROCESS ARGS		DELTA FUNC	STATE CHANGE
 		GamParser.ST_NONE : { # STATE NONE: DEFAULT
 		'GAM': 	 (args_float_1opt, 	delta_gam, 	GamParser.ST_GAM),
+		'ADD': 	 (lambda x:[],		delta_add, 	GamParser.ST_ADD),
+		'EOF': 	 (lambda x:[], 		delta_eof, 	GamParser.ST_EOF),
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'SH':    (args_txt_1,		delta_sh, 	GamParser.ST_ARG),
 		'SHFAIL':(args_txt_1,		delta_shfail, 	None),
@@ -933,26 +995,43 @@ class GamParser:
 		'REPORT':(args_float_1opt,	delta_report, 	None),
 		'WARP':	 (args_int_1,		delta_warp, 	None)},
 		GamParser.ST_GAM : { # STATE GAM: GAM DATA ITEMS
+		'GAM': 	 (lambda x:[],		delta_mag, 	GamParser.ST_NONE),
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
-		'MAG': 	 (lambda x:[],		delta_mag, 	GamParser.ST_NONE),
 		'CONST': (args_const,		delta_gamdata, 	None),
 		'POLY':	 (args_poly,		delta_gamdata, 	None)},
 		GamParser.ST_ARG : { # STATE ARG: ARGS FOR SH
+		'RUN':   (lambda x:[],		delta_run, 	GamParser.ST_NONE),
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
-		',':	 (args_txt_1,		delta_arg,	None),
-		'RUN':   (lambda x:[],		delta_run, 	GamParser.ST_NONE)}
+		',':	 (args_txt_or_num1,	delta_arg,	None)},
+		GamParser.ST_EOF : { # STATE EOF: echo as plain text until EOF
+		'EOF':   (lambda x:[],		delta_foe, 	GamParser.ST_NONE),
+		'DROP':  (args_int_1opt,	delta_drop, 	None),
+		'DUMP':  (args_int_1opt,	delta_dump, 	None),
+		'*':     (lambda x:[],		delta_echo, 	None)},
+		GamParser.ST_ADD : { # STATE ADD: add data to game
+		'ADD':   (lambda x:[],		delta_dda, 	GamParser.ST_NONE),
+		'DUMP':  (args_int_1opt,	delta_dump, 	None),
+		'DROP':  (args_int_1opt,	delta_drop, 	None),
+		'CONST': (args_const,		delta_gamdata, 	None),
+		'POLY':	 (args_poly,		delta_gamdata, 	None)}
 		}
 
 		# get map of valid acts for current state
+
 		tbl = state_map.get(self.state(), None)
 		if tbl:
 			act = line.lexxed[0][1].upper()
 			acts = tbl.get(act, None)
+			#DP("table" + str(acts))
 			# lookup $0 in table for parse state
 			if acts is None:
-				self.ParseError(i, 'Unknown act %s' % act)
+				if self.state() != GamParser.ST_EOF:
+					self.ParseError(i, 'Unknown act %s' % act, tbl=tbl)
+				elif self.state() == GamParser.ST_EOF:
+					# in EOF, echo  until EOF
+					acts = tbl['*']
 
 		else:
 			raise BadGamError('unknown state %s\n' % self.state())
@@ -977,12 +1056,16 @@ class Gam:
 		# inut schema is list of (GamNam, GamVal) pairs
 		# store internally indexed by str(nam)
 		self.schema = {}
+		self.append(schema)
+		self.timestamp = ts
+		DP('START GAME %s (on %s)' % (str(ts), self._started_str(ts)))
+
+	def append(self, schema):
 		for nam, val in schema:
 			if str(nam) in self.schema.keys():
 				raise BadGamError('name collision: "%s"' % str(nam))
 			self.schema[str(nam)] = (nam, val)
-		self.timestamp = ts
-		DP('START GAME %s (on %s)' % (str(ts), self._started_str(ts)))
+			
 
 	def t(self, t=None):
 		return datetime.utcnow().timestamp() - self.timestamp \
@@ -995,18 +1078,20 @@ class Gam:
 		return self._started_str(self.timestamp)
 
 	def report(self, ts, warp=0):
-		t = self.t(ts + warp)
-		_t = self.t(ts) # _t is no no warp
+		t = self.t(ts)
+		t_w = self.t(ts + warp)
 
 		t_str = '%.2f' % t
-		_t_str = '%.2f' % _t
+		t_w_str = '%.2f' % t_w
+		w_str = '%.2f' % warp
 
-		output  = o3('nam(f)', 'f(t)', 	'f', 	pre='\t')
-		output += o3('t', 	t_str, 	'', 	pre='\t')
-		output += o3('_t', 	_t_str, '', 	pre='\t')
+		output  = o3('nam(f)', 'f(t+w)', 'f', 	pre='\t')
+		output += o3('t+w', 	t_w_str, '', 	pre='\t')
+		output += o3('t', 	t_str, '', 	pre='\t')
+		output += o3('w', 	w_str, '', 	pre='\t')
 		for k in self.schema:
 			pair = self.schema[k]
-			output += o3(k, str(pair[1].f(t)),
+			output += o3(k, str(pair[1].f(t_w)),
 					str(pair[1]),   pre='\t')
 		return output
 
@@ -1025,6 +1110,7 @@ class GamSt:
 		self.sh			= None
 		self.error 		= None
 		self.valid 		= False
+		self.quiet 		= False
 
 		self.stack		= []
 		self.comms 		= []
@@ -1072,7 +1158,10 @@ class GamSt:
 		sh = self.find_sh(n)
 		if sh:
 			self.sh = sh
-			return 'found %s\n' % sh
+			if self.in_last_comm():
+				return 'found %s\n' % sh
+			else:
+				return ''
 		return 'not found\n'
 
 	def in_last_comm(self):
@@ -1092,6 +1181,9 @@ class GamSt:
 					stderr=subprocess.PIPE)
 				if res.returncode == 0:
 					output += str(res.stdout, 'UTF-8')
+					self.comms[self.step_counter].line.line += \
+						'\nEOF\n"%s"\nEOF\n' % \
+						'"\n"'.join(output.split('\n'))
 				else:
 					output += 'failed\n'
 			except PermissionError as e:
@@ -1106,10 +1198,13 @@ class GamSt:
 			(self.step_counter, comm.line,
 		   '======================='))
 		try:
-			output += '[%d]\t%s' % (self.step_counter,
-				# Now we actually run the step
-				comm(self)
-			)
+			if self.quiet:
+				output += comm(self)
+			else:
+				output += '[%d]\t%s' % (self.step_counter,
+					# Now we actually run the step
+					comm(self)
+				)
 			self.step_counter += 1
 			# only incremented on success
 		except GamException as e:
@@ -1142,6 +1237,7 @@ class GamSt:
 
 	def header(self):
 		return 'INIT v%s\n' % VERSION
+
 
 	def lexx_parse(self, l):
 		n = len(self.comms)
@@ -1183,11 +1279,11 @@ def attempt_fop(do, ls, u, m, f):
 def attempt_load(u):
 	ls  = attempt_fop(do_load, None, u,
 		'LOAD from ', 'FAIL read from')
-	DP('DO LOAD : [%s]' % str(ls))
+	#DP('DO LOAD : [%s]' % str(ls))
 	return ls
 
 def attempt_save(ls, u):
-	DP('DO SAVE: [%s]' % ls)
+	#DP('DO SAVE: [%s]' % ls)
 	return attempt_fop(do_save, ls, u,
 		'SAVE to', 'FAIL write to')
 
@@ -1231,7 +1327,7 @@ def process_req_body(req_body, user):
 		.replace('%2C', ',') \
 		.replace('%2F', '/') \
 		.replace('%3A', ':')
-	DP('input = {\n%s\n}' % with_lines)
+	#DP('input = {\n%s\n}' % with_lines)
 
 	lines = with_lines.split('\n')
 	if lines == ['']:
