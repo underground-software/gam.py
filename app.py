@@ -1,18 +1,21 @@
-import random, html, sys, re, os
-from urllib.parse import parse_qs
+import random, html, sys, re, os, traceback, requests, subprocess
 from datetime import datetime
-import traceback
+from http import cookies
+from math import log
 
-from config import PREPEND
+from config import PREPEND, AUTH_USERS, AUTH_SERVER, SH_PATH
 
 VERSION="0.1"
 APPLICATION="mars"
 
+# meta tag from https://stackoverflow.com/questions/7073396/disable-zoom-on-input-focus-in-android-webpage
 GAME_HTML="""
+<meta name="viewport" content="width=device-width, height=device-height,  initial-scale=1.0, user-scalable=no;user-scalable=0;"/>
+
+<div class="game_output">
 <form class="game_output" class="game_output">
-	<label for="out">Output</label>
 	<textarea id="game_output" class="game_output" name="out" readonly>%(output)s</textarea>
-</form>
+</form></div>
 	<script type="text/javascript">
 		var TA = document.getElementById('game_output')
 		TA.scrollTop = TA.scrollHeight
@@ -21,7 +24,8 @@ GAME_HTML="""
 
 <div class="game_input">
 <div class="fast_game_input"><form method="post" class="fast_game_input">
-	<input type="text" class="fast_game_input" name="in" autofocus />
+	<input type="text" class="fast_game_input" name="in"
+			autocomplete="off" autofocus />
 	<button type="submit">Run</button>
 </form></div>
 <div class="multi_game_input"><form method="post" class="multi_game_input">
@@ -57,25 +61,46 @@ def notfound_html(doc, SR):
 	SR('404 Not Found', [('Content-Type', 'text/html')])
 	return bytes(doc, "UTF-8")
 
-def generate_html(doc, msgs, env, SR):
-	head = ''
+def prepend():
+	head=''
 	for n in PREPEND:
 		with open(n, 'r') as f:
 			head += f.read()
+	return head
 
-	page = head + doc + messageblock(msgs)
+def generate_html(doc, msgs, env, SR):
+	page = prepend() + doc + messageblock(msgs)
 
 	return ok_html(page, SR)
 
+def get_token_from_cookie(env):
+	US=None
+
+	# get auth=$TOKEN from user cookie
+	cookie_user_raw = env.get('HTTP_COOKIE', '')
+	cookie_user = cookies.BaseCookie('')
+	cookie_user.load(cookie_user_raw)
+
+	auth = cookie_user.get('auth', cookies.Morsel())
+	if auth.value is not None:
+		return auth.value
+
+
 def get_authorized_user(env):
-	query_string = env.get("QUERY_STRING", "")
-	queries = parse_qs(query_string)
-	user = queries.get('user', None)
-	if user is not None:
-		user = user[0]
-	else:
-		return env.get('QUERY_STRING','default')
-	return user
+	token = get_token_from_cookie(env)
+	uri ='%s?token=%s' % (AUTH_SERVER, token)
+
+	res = requests.get(uri, verify=False)
+
+	DP('req to uri="%s" returned %s' % (uri, res.status_code))
+	DP('content: %s' % res.text)
+	
+	if res.status_code == 200:
+		split=res.text.split('=')
+		if len(split) > 0:
+			return split[1]
+
+	return None
 
 def generate_price(digits):
 
@@ -264,11 +289,13 @@ class GamValPoly(GamVal):
 
 	def f(self, t):
 		total=0
-		for p in self.pairs:
-			total += p[0] * (t ** p[1])
-			DP('POLY TERM %g = %g * t ^ %g' % (total, p[0], p[1]))
-		
-		return '%g' % total
+		try:
+			for p in self.pairs:
+				total += p[0] * (t ** p[1])
+				DP('POLY TERM %g = %g * t ^ %g' % (total, p[0], p[1]))
+			return '%g' % total
+		except OverflowError:
+			return 'overflow'
 
 	def __str__(self):
 		return 'f(t) = %s' % self._str('(%g)*t^(%g)%s', ' + ')
@@ -303,14 +330,32 @@ class GamLine:
 	NULL=chr(0)
 	CH_OTH=1<<0	# character not included
 	CH_ALP=1<<1	# alphabetic character (both cases)
-	CH_NUM=1<<2	# numeric character
+	CH_DIG=1<<2	# numeric character
 	CH_SPC=1<<3	# whitespace character
 	CH_COL=1<<4	# colon (:)
 	CH_SLS=1<<5	# slash (/)
 	CH_DOT=1<<6	# dot (.)
 	CH_QUT=1<<7	# quote (")
-	CH_DSH=1<<8	# dash (-)
-	CH_NIL=1<<9	# GamLine.NULL
+	CH_COM=1<<8	# comma (,)
+	CH_BNG=1<<9	# exclamation point, aka bang (!)
+	CH_DSH=1<<10	# comma (-
+	CH_NIL=1<<11	# GamLine.NULL
+	# consider , and  ! to be part of string text input domain
+	CH_TXT=CH_ALP + CH_COM + CH_BNG
+	CH_NUM=CH_DIG
+	# dash only valid at start of number
+	CH_SNM=CH_NUM + CH_DSH
+
+
+	@classmethod
+	def ch_in(_, child, parent):
+		# test the child bits in the parent
+		return all((parent >> j) & 1
+			for j in filter(lambda x:x is not None,
+				[i if ((child >> i) & 1) == 1
+				   else None
+                                   for i in range(int(log(child, 2)) + 1)]))
+
 	def chartype(self, char):
 		if char.isalpha():
 			return GamLine.CH_ALP
@@ -326,6 +371,10 @@ class GamLine:
 			return GamLine.CH_DOT
 		elif char == '"':
 			return GamLine.CH_QUT
+		elif char == ',':
+			return GamLine.CH_COM
+		elif char == '!':
+			return GamLine.CH_BNG
 		elif char == '-':
 			return GamLine.CH_DSH
 		elif char == GamLine.NULL:
@@ -354,7 +403,9 @@ class GamLine:
 	ST_TEXT		= 1<<2
 	ST_QUOT		= 1<<3
 	ST_NUMB		= 1<<4
+	ST_NUMB		= 1<<4
 	ST_ENQT		= 1<<5
+	ST_OPER		= 1<<6
 
 	ALL_STATES = [ST_STRT, ST_TEXT, ST_NUMB, ST_ENQT]
 
@@ -364,7 +415,8 @@ class GamLine:
 			GamLine.ST_TEXT: '[Lexx State Text]',
 			GamLine.ST_QUOT: '[Lexx State Quote]',
 			GamLine.ST_NUMB: '[Lexx State Number]',
-			GamLine.ST_ENQT: '[Lexx State End Quote]'
+			GamLine.ST_ENQT: '[Lexx State End Quote]',
+			GamLine.ST_ENQT: '[Lexx State Operator]'
 				}.get(st,'[Lexx State Unknown]')
 
 
@@ -411,9 +463,9 @@ class GamLine:
 				# new quoted text and saves word
 				if typ == GamLine.CH_QUT:
 					buff_emit()
-				elif typ == GamLine.CH_ALP:
+				elif GamLine.ch_in(typ, GamLine.CH_TXT):
 					buff_in(line[i])
-				else: #typ != GamLine.CH_ALP
+				else: #typ not in GamLine.CH_TXT
 					# append buff to result and wipe buff
 					buff_emit()
 					st=GamLine.ST_STRT
@@ -424,7 +476,7 @@ class GamLine:
 				else:
 					buff_in(line[i])
 			elif st == GamLine.ST_NUMB:
-				if typ == GamLine.CH_NUM:
+				if GamLine.ch_in(typ, GamLine.CH_NUM):
 					buff_in(line[i])
 				# one decimal point per number
 				elif dot_unseen and typ == GamLine.CH_DOT:
@@ -439,14 +491,13 @@ class GamLine:
 				self.LexxError('Unknown lexx state')
 
 			if st == GamLine.ST_STRT:
-				if typ == GamLine.CH_NUM or \
-						typ == GamLine.CH_DSH:
+				if GamLine.ch_in(typ, GamLine.CH_SNM):
 					buff_emit()
 					buff_set_tk(GamLine.TK_NUM)
 					buff_in(line[i])
 					dot_unseen=True
 					st=GamLine.ST_NUMB
-				elif typ == GamLine.CH_ALP:
+				elif GamLine.ch_in(typ, GamLine.CH_TXT):
 					buff_emit()
 					buff_set_tk(GamLine.TK_TXT)
 					buff_in(line[i])
@@ -510,7 +561,7 @@ class GamEXEComm:
 	def __call__(self, gs):
 		output=''
 		output += self.func(gs, self.args)
-		DP('RUN %s' % str(self.line.line))
+		DP('EXE %s' % str(self.line.line))
 
 		return output
 
@@ -530,7 +581,8 @@ def o2(a, b, sep='', pre=''):
 class GamParser:
 	ST_NONE	= 1<<0
 	ST_GAM	= 1<<1
-	ALL_STATES = [ST_NONE, ST_GAM]
+	ST_ARG	= 1<<2
+	ALL_STATES = [ST_NONE, ST_GAM, ST_ARG]
 
 	def state(self):
 		return self._state
@@ -544,7 +596,8 @@ class GamParser:
 	def find_st_str(self, st):
 		return {
 			GamParser.ST_NONE:'[Parse State None]',
-			GamParser.ST_GAM: '[Parse State Gam]'
+			GamParser.ST_GAM: '[Parse State Gam]',
+			GamParser.ST_ARG: '[Parse State Arg]'
 				}.get(st, '[Parse State Unknown]')
 
 	def state_str(self):
@@ -577,6 +630,40 @@ class GamParser:
 				return None
 			return a[n][1]
 
+		def args_txt_1(args, coersion=str, tn='str', opt=False):
+			argc = len(args)
+			ac = _vl(0, args)
+			tk = _tk(1, args)
+			vl = _vl(1, args)
+
+			def validate_txt_1opt(E, argc, tk):
+				if argc > 2:
+					E('0 or 1 args', '%d args\n' % argc)
+				elif argc == 2 and tk != GamLine.TK_TXT:
+					E('1 string', 'expected text\n')
+
+			def validate_txt_1nonopt(E, argc, tk):
+				if argc != 2:
+					E('1 arg', '%d args\n' % argc)
+				elif tk != GamLine.TK_TXT:
+					E('1 string', 'expected text\n')
+
+			def E(want, msg):
+				nonlocal vl
+				got = str(vl)
+				self.ArgParseError(i, ac, want, got, opt=msg)
+
+			if opt:
+				validate_txt_1opt(E, argc, tk)
+				if argc == 1:
+					return []
+			else:
+				validate_txt_1nonopt(E, argc, tk)
+
+			try:
+				return [(vl)]
+			except (TypeError, ValueError):
+				E(tn, 'cannnot coerce to %s\n' % tn)
 
 		def args_num_1(args, coersion, tn, opt=False):
 			argc = len(args)
@@ -626,6 +713,10 @@ class GamParser:
 		def args_float_1opt(args):
 			return args_num_1(args,
 				lambda x: float(x), 'float', opt=True)
+
+		def args_float_1(args):
+			return args_num_1(args,
+				lambda x: float(x), 'float', opt=False)
 
 		def args_gam(args):
 			return args_float_1opt(args)
@@ -767,24 +858,62 @@ class GamParser:
 			gs.warp(secs)
 			return o2('WARP', secs)
 
+		def stack_pop_two(gs):
+			if len(gs.stack) < 2:
+				raise GamException(gs, 'stack underflow')
+			return (gs.stack_pop(), gs.stack_pop())
+
 		def delta_mag(gs, args):
 			schema = []
-			a, b = gs.stack_pop(), gs.stack_pop()
+			a, b = stack_pop_two(gs)
 			while b != 'GAM':
-				if len(gs.stack) < 2:
-					raise GamException(gs, 'stack underflow')
-				
 				schema += [(b, a)]
 
-				a = gs.stack_pop()
-				b = gs.stack_pop()
+				a, b = stack_pop_two(gs)
 			try:
 				gs.game = Gam(schema, a.timestamp())
 			except BadGamError as e:
 				raise GamException(gs, msg=str(e))
 		
 			return o2('MAG', a)
-						
+
+		def delta_shfail(gs, args):
+			sh = args[0]
+			return o2('SHFAIL', sh)
+
+		def delta_sh(gs, args):
+			sh = args[0]
+			output = o2('SH', sh)
+			output += gs.new_sh(sh)
+
+			if gs.sh:
+				gs.stack_push('SH')
+				gs.stack_push(gs.sh)
+			else:
+				# history hack to remove failed load
+				gs.comms[gs.step_counter].line.line = \
+					'SHFAIL "%s"' % sh 
+
+			return output
+
+		def delta_run(gs, args):
+			a, b = stack_pop_two(gs)
+			args = []
+			while b != 'SH':
+				args += [str(a)]
+				a, b = stack_pop_two(gs)
+				
+			output = o3('RUN', a, args)
+			output += gs.do_run(a, args)
+		
+			return output
+
+		def delta_arg(gs, args):
+			arg = str(args[0])
+			gs.stack_push(',')
+			gs.stack_push(arg)
+			return o2('ARG', '%s' % arg)
+
 		def delta_gamdata(gs, args):
 			gs.stack_push(args[0])
 			gs.stack_push(args[1])
@@ -794,19 +923,26 @@ class GamParser:
 
 		
 		state_map = {
-		# ACT 	 ARGS_VALID?		DELTA FUNC	STATE CHANGE
-		GamParser.ST_NONE : {
+		# ACT 	 PROCESS ARGS		DELTA FUNC	STATE CHANGE
+		GamParser.ST_NONE : { # STATE NONE: DEFAULT
 		'GAM': 	 (args_float_1opt, 	delta_gam, 	GamParser.ST_GAM),
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
+		'SH':    (args_txt_1,		delta_sh, 	GamParser.ST_ARG),
+		'SHFAIL':(args_txt_1,		delta_shfail, 	None),
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
 		'REPORT':(args_float_1opt,	delta_report, 	None),
 		'WARP':	 (args_int_1,		delta_warp, 	None)},
-		GamParser.ST_GAM : {
+		GamParser.ST_GAM : { # STATE GAM: GAM DATA ITEMS
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
 		'MAG': 	 (lambda x:[],		delta_mag, 	GamParser.ST_NONE),
 		'CONST': (args_const,		delta_gamdata, 	None),
-		'POLY':	 (args_poly,		delta_gamdata, 	None)}
+		'POLY':	 (args_poly,		delta_gamdata, 	None)},
+		GamParser.ST_ARG : { # STATE ARG: ARGS FOR SH
+		'DROP':  (args_int_1opt,	delta_drop, 	None),
+		'DUMP':  (args_int_1opt,	delta_dump, 	None),
+		',':	 (args_txt_1,		delta_arg,	None),
+		'RUN':   (lambda x:[],		delta_run, 	GamParser.ST_NONE)}
 		}
 
 		# get map of valid acts for current state
@@ -886,8 +1022,9 @@ class GamSt:
 		self.parser 		= GamParser()
 
 		self.game 		= None
-		self.valid 		= False
+		self.sh			= None
 		self.error 		= None
+		self.valid 		= False
 
 		self.stack		= []
 		self.comms 		= []
@@ -923,6 +1060,44 @@ class GamSt:
 	def invalidate(self):
 		self.valid = False
 
+	def find_sh(self, n):
+		if n is None:
+			return None
+		for p in SH_PATH:
+			sh = '%s/%s.sh' % (p, n)
+			if os.path.isfile(sh):
+				return sh
+
+	def new_sh(self, n):
+		sh = self.find_sh(n)
+		if sh:
+			self.sh = sh
+			return 'found %s\n' % sh
+		return 'not found\n'
+
+	def in_last_comm(self):
+		return self.step_counter == len(self.comms) - 1
+
+	def do_run(self, sh, args):
+		output = ''
+		if self.sh is None or sh != self.sh:
+			output += '%s not loaded\n' % sh
+			return output
+			
+		# only run in last command to not re-run on every load
+		if self.in_last_comm():
+			try:
+				res = subprocess.run([self.sh] + args,
+					stdout=subprocess.PIPE,
+					stderr=subprocess.PIPE)
+				if res.returncode == 0:
+					output += str(res.stdout, 'UTF-8')
+				else:
+					output += 'failed\n'
+			except PermissionError as e:
+				raise GamException(self, str(e))
+		return output
+		
 
 	def run_step(self):
 		comm = self.comms[self.step_counter]
@@ -966,7 +1141,7 @@ class GamSt:
 		return self.has_comms() and self.is_valid()
 
 	def header(self):
-		return 'START GAME %s\n' % VERSION
+		return 'INIT v%s\n' % VERSION
 
 	def lexx_parse(self, l):
 		n = len(self.comms)
@@ -990,7 +1165,6 @@ class GamSt:
 		return output
 
 def do_load(u, n, ls=None):
-	n = '%s.game' % u
 	with open(n, 'r') as f:
 		return [l.strip() for l in f.readlines()]
 
@@ -1000,7 +1174,7 @@ def do_save(u, n, ls):
 			print(l, file=f)
 
 def attempt_fop(do, ls, u, m, f):
-	n = '%s.game' % u
+	n = 'saves/%s.save' % u
 	try:
 		return ('[%s %s]\n' % (m, n), do(u, n, ls=ls))
 	except FileNotFoundError:
@@ -1052,9 +1226,11 @@ def process_req_body(req_body, user):
 	with_lines = req_body[len("in="):] \
 		.replace('%0D%0A','\n') \
 		.replace('+', ' ') \
-		.replace('%3A', ':') \
+		.replace('%21', '!') \
+		.replace('%22', '"') \
+		.replace('%2C', ',') \
 		.replace('%2F', '/') \
-		.replace('%22', '"')
+		.replace('%3A', ':')
 	DP('input = {\n%s\n}' % with_lines)
 
 	lines = with_lines.split('\n')
@@ -1064,17 +1240,25 @@ def process_req_body(req_body, user):
 	
 	return run_game(lines, user)
 
-def handle_game(env, SR):
+def handle_terminal(env, SR):
 	user = get_authorized_user(env)
+
 
 	req_body_size = get_req_body_size(env)
 	req_body = ''
+	msgs = [('user', user), ('appver', appver())]
+
+
+	if user not in AUTH_USERS:
+		return generate_html('<h3>user %s unauthorized</h3>' % \
+			user, msgs, env, SR)
+
 	if is_post_req(env):
 		req_body = html.escape(str(env['wsgi.input'].read(req_body_size), "UTF-8"))
 
+	msgs += [('body', req_body)]
 	base = GAME_HTML % { 'output' : process_req_body(req_body, user) }
 
-	msgs = [('user', user), ('appver', appver()), ('body', req_body)]
 
 	return generate_html(base, msgs, env, SR)
 
@@ -1094,8 +1278,12 @@ def handle_US(env, SR):
 
 
 def handle_404(env, SR):
-	return notfound_html("HTTP ERROR 404: NOT FOUND", SR)
+	user = get_authorized_user(env)
+	msgs = messageblock([('user', user), ('appver', appver())])
+
+	return notfound_html(prepend() +
+		"<h1>HTTP ERROR 404: NOT FOUND</h1>" + msgs, SR)
 
 def application(env, SR):
-	return {'/US': handle_US, '/game':handle_game} \
+	return {'/US': handle_US, '/terminal':handle_terminal} \
 		.get(env.get('PATH_INFO',''), handle_404)(env, SR)
