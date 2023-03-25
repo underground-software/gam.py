@@ -184,12 +184,13 @@ def is_post_req(env):
 # VAL := POLY | CONST
 # START_LINE := START | START <unix_timestamp>
 
-TYPE_re		='(poly|const)'
+TYPE_re		='(poly|const|natty)'
 IDENT_re	='[a-zA-Z ./:]+'
 NUM_re		='[-0-9]?[0-9]+\.?[0-9]*'
 POLY_re		='(%s:%s\/?)+' 	% (NUM_re, NUM_re)
 CONST_re 	='[_0-9a-zA-Z ]+'
-VAL_re 		='(%s|%s)' 	% (POLY_re, CONST_re)
+NATTY_re 	='[0-9]+.*([0-9]+\.[0-9])?'
+VAL_re 		='(%s|%s|%s)' 	% (POLY_re, CONST_re, NATTY_re)
 TYPE_IDENT_re	='%s\w*%s'	% (TYPE_re, IDENT_re)
 GAME_re		='GAM.*'
 DROP_re		='DROP\W*(%s)?' % (NUM_re)
@@ -305,15 +306,42 @@ class GamNam:
 
 # doesn't do anything by itself: parent to other value types
 class GamVal:
-	def __init__(self, E, val):
+	SEQ     = 0
+	T_POLY  = 1
+	T_CONST = 2
+	T_NATTY = 3
+	T_COMBO = 4
+
+	CD_DEFAULT={T_POLY:None,T_CONST:None,T_NATTY:None}
+
+	@classmethod
+	def seq(cls):
+		cls.SEQ += 1
+		return cls.SEQ
+
+	def __init__(self, E, val, t=T_COMBO):
+		self.vid = GamVal.seq()
+		self._t = t
 		assert_valid(E, VAL_re, val, info='Generic Val')
+
+	def valtype(self):
+		return self._t
+
+	def getvid(self):
+		return self.vid
+
+	def combine(self, other):
+		cd = GamVal.CD_DEAFULT
+		cd[self._t] = self
+		cd[other._t] = other
+		return GamValCombo(self.E, cd)
 
 class GamValPoly(GamVal):
 	def __init__(self, E, val):
 		# arg 3 empty => generate 0 polynomial 0t^0
 		if val is None:
 			val = '0:0'
-		super().__init__(E, val)
+		super().__init__(E, val, t=GamVal.T_POLY)
 		assert_valid(E, POLY_re, val, info='Polynomial')
 		pairs_raw = val.split('/')
 		self.raw_pairs = [(float(pair[0]), float(pair[1])) \
@@ -325,6 +353,7 @@ class GamValPoly(GamVal):
 			if v is None:
 				self.pairs[p[1]] = 0
 			self.pairs[p[1]] += p[0]
+		self.E = E
 
 	def _str(self, fmt, sep):
 		base = ''
@@ -349,21 +378,31 @@ class GamValPoly(GamVal):
 		
 
 
-	def addto(self, rhs):
-		for e in rhs.pairs:
-			DP('add (%g + %g) * (t ^ %g)' % \
-				(self.get_c_from_e(e), rhs.pairs[e], e))
-			self.add_c_to_e(rhs.pairs[e], e)
+	def addto(self, gs, rhs):
+		if rhs.valtype() == GamVal.T_NATTY:
+			self.add_c_to_e(rhs.val, 0)
+		elif self.valtype() != rhs.valtype():
+			raise GamException(gs, 'unsupported combination of poly and non-poly')
+		else:
+			for e in rhs.pairs:
+				DP('add (%g + %g) * (t ^ %g)' % \
+					(self.get_c_from_e(e), rhs.pairs[e], e))
+				self.add_c_to_e(rhs.pairs[e], e)
 
-	def f(self, t):
+	def f_raw(self, t):
 		total=0
 		try:
 			for p in self.pairs:
 				total += self.pairs[p] * (t ** p)
 				#DP('POLY TERM %g = %g * t ^ %g' % (total, self.pairs[p], p))
-			return '%g' % total
+			return total
 		except OverflowError:
+			# FIXME: What about this when doing natty + poly?
 			return 'overflow'
+
+	def f(self, t):
+		return '%g' % self.f_raw(t)
+
 
 	def __str__(self):
 		return 'f(t+w) = %s' % self._str('(%g)*t^(%g)%s', ' + ')
@@ -371,23 +410,121 @@ class GamValPoly(GamVal):
 	def __repr__(self):
 		return 'GamValPoly([%s])' % self._str('("%g","%g")%s', ',')
 
+	def subset(self, other):
+		# return true if self is a subset of other
+		for p in self.pairs:
+			if p not in other.pairs:
+				return False
+			if self.pairs[p] != other.pairs[p]:
+				return False
+		return True
+
+	def __eq__(self, other):
+		# self \subset other AND other \subset self must be true
+		return self.subset(other) and other.subset(self)
+
+	def __bool__(self):
+		return self.val == GamValPoly(self.E, None)
+
 class GamValConst(GamVal):
 	def __init__(self, E, val):
 		# arg 3 empty => generate 0 const '' (empty string)
 		if val is None:
 			val = ''
-		super().__init__(E, val)
+		super().__init__(E, val, t=GamVal.T_CONST)
 		assert_valid(E, CONST_re, val, info='Constant')
 		self.val = val
+		self.vstr = str(self.getvid())
+		self.E = E
 
 	def f(self, t):
 		return self.val
+
+	def addto(self, gs, rhs):
+		if self.valtype() != rhs.valtype():
+			raise GamException(gs, 'unsupported combination of const and non-const')
+		self.val += rhs.val
 
 	def __str__(self):
 		return str(self.val)
 
 	def __repr__(self):
 		return 'GameValConst(%s)' % repr(self.val)
+
+	def __eq__(self, other):
+		return self.val == other.val
+
+	def __bool__(self):
+		return self.val == GamValConst(self.E, None)
+
+class GamValNatty(GamVal):
+	def __init__(self, E, val, t_snap=0, t=GamVal.T_NATTY):
+		# arg 3 empty => generate 0
+		self.default = False
+		if val is None:
+			val = int(0)
+			self.default = True
+
+		self.t = t_snap
+		super().__init__(E, str(val), t=t)
+		assert_valid(E, NATTY_re, str(val), info='Natural')
+		self.val = int(val)
+		self.vstr = str(self.getvid())
+		self.E = E
+
+	def f(self, t):
+		return '%g' % self.val
+
+	def addto(self, gs, rhs):
+		if rhs.t == GamVal.T_POLY:
+			tmp = self.val + rhs.f_raw(self.t)
+			if tmp < 0:
+				raise GamException(gs, 'unsupported attempt to negatize natty')
+			self.val = tmp
+		elif self.valtype() != rhs.valtype():
+			raise GamException(gs, 'unsupported combination of natty and non-natty')
+		else:
+			self.val += rhs.val
+
+	def __str__(self):
+		return '%06d\t(t=%d)' % (self.val, self.t)
+	
+	def __repr__(self):
+		return 'GamValNatty(%s, "%d")' % (repr(self.val), self.t)
+
+
+	def __eq__(self, other):
+		return self.val == other.val
+
+	def __bool__(self):
+		return self.val == GamValNatty(self.E, None)
+
+class GamValCombo(GamVal):
+
+	def __init__(self, E, cd=GamVal.CD_DEFAULT):
+		if cd[GamVal.T_POLY] is None:
+			poly	= GamValPoly( E, None)
+		if cd[GamVal.T_CONST] is None:
+			const	= GamValConst(E, None)
+		if cd[GamVal.T_NATTY] is None:
+			natty	= GamValNatty(E, None)
+		self.poly 	= poly
+		self.pstr 	= poly.pstr
+		self.const 	= const
+		self.cstr 	= const.cstr
+		self.natty 	= natty
+		self.nstr 	= natty.nstr
+		self.E = E
+
+	def __str__(self):
+		return '(%s, %s, %s)' % (self.cstr, self.pstr, self.nstr)
+
+	def __repr__(self):
+		return '(%s, %s, %s)' % (self.cstr, self.pstr, self.nstr)
+
+	def addto(self, gs, other):
+		raise GamException(gs, 'combo addto TODO')
+		
 	
 class GamLine:
 	COUNTER = 0
@@ -864,7 +1001,7 @@ class GamParser:
 
 			def E(want, got, msg):
 				self.ArgParseError(i, vl0, want, got, opt=msg)
-			if argc != 2 or argc != 3:
+			if argc != 2 and argc != 3:
 				E('2 or 3 args', '%d args' % argc, 'bad arity')
 				
 			validate_gam_line(args)
@@ -900,6 +1037,31 @@ class GamParser:
 				raw = ''.join([x[1] for x in args[2:]])
 			ret = [GamNam(E, vl0, vl1), GamValPoly(E, raw)]
 			return ret
+
+		def args_natty(args):
+			argc = len(args)
+			tk0= _tk(0, args)
+			tk1= _tk(1, args)
+			tk2= _tk(2, args)
+			tk3= _tk(3, args)
+			vl0= _vl(0, args)
+			vl1= _vl(1, args)
+			vl2= _vl(2, args)
+			vl3= _vl(3, args)
+
+
+			def E(want, got, msg):
+				self.ArgParseError(i, vl0, want, got, opt=msg)
+
+			if argc < 2 or argc > 4:
+				E('2-4 args', '%d args' % argc, 'bad arity')
+			if vl3 is not None:
+				try:
+					vl3 = int(vl3)
+				except (TypeError, ValueError) as e:
+					raise E('int', str(vl3),  'bad natty t value %s' % str(e))
+			validate_gam_line(args)
+			return [GamNam(E, vl0, vl1), GamValNatty(E, vl2, t_snap=vl3)]
 
 		
 		def delta_gam(gs, args):
@@ -1072,12 +1234,14 @@ class GamParser:
 			# last two in rhss are NONE,ADD
 			# penultimate pair in rhss are lhs
 			nam, val = rhss[-2][1], rhss[-2][0]
-			DP('nav: %s, val: %s' % (str(nam), str(val)))
+			DP('nam: %s, val: %s' % (str(nam), str(val)))
 			target = gs.game.schema.get(str(nam), None)
 
+			# if target does not exist, complain
 			if target is None:
-				gs.game.append([(nam, val)])
-				target = gs.game.schema[str(nam)]
+				raise GamException(gs, 'ADD target does not exist')
+				#gs.game.append([(nam, val)])
+				#target = gs.game.schema[str(nam)]
 
 			# cut off arget and NONE,ADD at bottom
 			#DP('RHSS: %s' % str(rhss))
@@ -1086,8 +1250,8 @@ class GamParser:
 
 			for rhs in rhs_:
 				nam, val = rhs[1], rhs[0]
-				rhs_poly = gs.game.schema.get(str(nam), (None, val))[1]
-				target[1].addto(rhs_poly)
+				rhs_val  = gs.game.schema.get(str(nam), (None, val))[1]
+				target[1].addto(gs, rhs_val)
 
 
 			return o2('ADDED', i)
@@ -1166,6 +1330,32 @@ class GamParser:
 		def delta_gamdata(gs, args):
 			return _delta_gamdata(gs, args)
 
+		def _delta_natty(gs, args, doget=False):
+			argc= len(args)
+			pre='SET\t'
+			mid='TO'
+			if doget:
+				pre = 'GET\t'
+				mid = ''
+			if args[1].t is None:
+				first =''
+				if args[1].default:
+					first = '%s ' % str(args[1].val)
+				#DP('found argc=%s, args = %s' % (argc, str(args)))
+				#ts = datetime.utcnow().timestamp()
+				t = int(args[1].val)
+				# hack to get start time in save:
+				gs.comms[gs.step_counter].line.line += \
+					' %s%s' % (first, str(t))
+				args[1].t = t
+
+			return _delta_gamdata(gs, args, pre=pre, mid=mid)
+			
+		def delta_natty(gs, args):
+			return _delta_natty(gs, args, doget=False)
+
+		def delta_getnatty(gs, args, doset=False):
+			return _delta_natty(gs, args, doget=True)
 
 		def delta_eof(gs, args):
 			DP('entering EOF mode')
@@ -1199,13 +1389,14 @@ class GamParser:
 		'DELFAIL':(lambda x:[],		delta_delfail, 	None),
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
 		'REPORT':(args_float_1opt,	delta_report, 	None),
-		'R':	(args_float_1opt,	delta_report, 	None),
+		'R':	 (args_float_1opt,	delta_report, 	None),
 		'WARP':	 (args_int_1,		delta_warp, 	None)},
 		GamParser.ST_GAM : { # STATE GAM: GAM DATA ITEMS
 		'GAM': 	 (lambda x:[],		delta_mag, 	GamParser.ST_NONE),
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
 		'CONST': (args_const,		delta_gamdata, 	None),
+		'NATTY': (args_natty,		delta_natty,	None),
 		'POLY':	 (args_poly,		delta_gamdata, 	None)},
 		GamParser.ST_ARG : { # STATE ARG: ARGS FOR SH
 		'RUN':   (lambda x:[],		delta_nur, 	GamParser.ST_NONE),
@@ -1222,18 +1413,21 @@ class GamParser:
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'CONST': (args_const,		delta_gamdata, 	None),
+		'NATTY': (args_natty,		delta_natty,	None),
 		'POLY':	 (args_poly,		delta_gamdata, 	None)},
 		GamParser.ST_DEL : { # STATE DEL: remove data from game
 		'DEL':   (lambda x:[],		delta_led, 	GamParser.ST_NONE),
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'CONST': (args_const,		delta_gamdata, 	None),
+		'NATTY': (args_natty,		delta_natty,	None),
 		'POLY':	 (args_poly,		delta_gamdata, 	None)},
 		GamParser.ST_ADD : { # STATE ADD: add polynomials
 		'ADD':   (lambda x:[],		delta_dda, 	GamParser.ST_NONE),
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'CONST': (args_const,		delta_dataget, 	None),
+		'NATTY': (args_natty,		delta_getnatty,	None),
 		'POLY':	 (args_poly,		delta_dataget, 	None)}
 		}
 
@@ -1329,17 +1523,22 @@ class Gam:
 
 		output  = ''
 		output += oline('-')
-		output += o3('nam(f)\t', 'f(t+w)', 'f')
+		output += o3('nam(f)\t', 'f(t+w)', '\tf')
 		output += oline('-')
-		output += o3('t+w\t', 	t_w_str, '',)
-		output += o3('t\t', 	t_str, '')
-		output += o3('w\t', 	w_str, '')
+		output += o3('|t+w\t', 	t_w_str, '',)
+		output += o3('|t\t', 	t_str, '')
+		output += o3('|w\t', 	w_str, '')
 		for k in self.schema:
 			pair = self.schema[k]
 			e = ''
-			if len(k) < 8:
+			pre = '|'
+			if len(k) < 8-len(pre):
 				e = '\t'
-			output += o3(k + e, str(pair[1].f(t_w)), str(pair[1]))
+			output += o3(k + e,
+					'%s\t' % pair[1].f(t_w),
+					str(pair[1]),
+					pre=pre)
+					#pre='%d| ' % pair[1].getvid())
 		return output
 
 	def __repr__(self):
