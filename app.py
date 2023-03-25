@@ -6,13 +6,40 @@ from math import log
 
 from config import PREPEND, AUTH_USERS, AUTH_SERVER, SH_PATH
 
+from table import table
+
 VERSION="0.1"
 APPLICATION="mars"
 
 GAME_HTML="""
-
-
-"""
+<div class="welcome">
+	<h1>Welcome, %(user)s!</h1>
+</div>
+<div id="clicker" >
+	<div class="units">
+		%(units)s
+	</div>
+	<div class="stats">
+		%(stats)s
+	</div>
+</div>
+""".strip() % {
+	'units': table([
+	('type', 'count'),
+	('pickpockets', '0'),
+	('muggers', '0'),
+	('home invaders', '0'),
+	('carjackers', '0'),
+	('bank robbers', '0'),
+	('mail fraudsters', '0'),
+	('crypto scammers', '0'),
+	('darknet moguls', '0'),
+	('high seas pirates', '0'),
+	('investment bankers', '0')
+	]), 'stats' : table([
+	('key', 'value'),
+	('victims', '0')
+	]), 'user': '%s'}
 
 # meta tag from https://stackoverflow.com/questions/7073396/disable-zoom-on-input-focus-in-android-webpage
 TERMINAL_HTML="""
@@ -253,7 +280,7 @@ class GamException(GamError):
 
 	def string(self):
 		output = super().__str__()
-		output += 'stack: %s\n' % str(self.s)
+		output += 'stack: %s' % self.gs.stack_str()
 		#tb = traceback.format_exc()
 		#output += '%s\n' % str(tb)
 		output += '======[NOT SAVED]======\n'
@@ -283,6 +310,9 @@ class GamVal:
 
 class GamValPoly(GamVal):
 	def __init__(self, E, val):
+		# arg 3 empty => generate 0 polynomial 0t^0
+		if val is None:
+			val = '0:0'
 		super().__init__(E, val)
 		assert_valid(E, POLY_re, val, info='Polynomial')
 		pairs_raw = val.split('/')
@@ -306,27 +336,31 @@ class GamValPoly(GamVal):
 
 		return base
 
-	def __add__(self, rhs):
-		lhs_pairs = [p for p in self.pairs]
-		for p in rhs.pairs:
-			r_e = p[1]
-			r_c = p[0]
-			if self.pairs.get(r_e, None) is None:
-				p.pairs[r_e] = 0
-			lhs_pairs[r_e] += r_c
+	def add_c_to_e(self, c, e):
+		if self.pairs.get(e, None) is None:
+			self.pairs[e] = 0
+		self.pairs[e] += c
 
-		raw_pairs = []
-		for p in lhs_pairs:
-			raw_pairs += [(lhs_pairs[p], p)]
+	def get_c_from_e(self, e):
+		if self.pairs.get(e, None) is None:
+			return 0
+		else:
+			return self.pairs[e]
 		
-		return GamValPoly(raw_pairs)
+
+
+	def addto(self, rhs):
+		for e in rhs.pairs:
+			DP('add (%g + %g) * (t ^ %g)' % \
+				(self.get_c_from_e(e), rhs.pairs[e], e))
+			self.add_c_to_e(rhs.pairs[e], e)
 
 	def f(self, t):
 		total=0
 		try:
 			for p in self.pairs:
 				total += self.pairs[p] * (t ** p)
-				DP('POLY TERM %g = %g * t ^ %g' % (total, self.pairs[p], p))
+				#DP('POLY TERM %g = %g * t ^ %g' % (total, self.pairs[p], p))
 			return '%g' % total
 		except OverflowError:
 			return 'overflow'
@@ -339,6 +373,9 @@ class GamValPoly(GamVal):
 
 class GamValConst(GamVal):
 	def __init__(self, E, val):
+		# arg 3 empty => generate 0 const '' (empty string)
+		if val is None:
+			val = ''
 		super().__init__(E, val)
 		assert_valid(E, CONST_re, val, info='Constant')
 		self.val = val
@@ -624,6 +661,9 @@ class GamEXEComm:
 	def __repr__(self):
 		return 'EXE(%s)' % repr(self.line.line)
 
+def oline(c):
+	return '%s\n' % ''.join([c for i in range(80)])
+
 def o3(a, b, c, sep='', pre=''):
 	return '%s%s\t%s%s\t%s%s\n' % (pre, a, sep, b, sep, c)
 
@@ -805,10 +845,9 @@ class GamParser:
 			def E(want, got, msg):
 				self.ArgParseError(i, ac, str(want), str(got), opt=msg)
 
-
 			if argc > 1 and tk1 != GamLine.TK_TXT:
 				E(GamLine.find_tk_str(GamLine.TK_TXT),
-					GamLine.find_tk_str(tk2),
+					GamLine.find_tk_str(tk1),
 					'expected text')
 			
 
@@ -825,15 +864,17 @@ class GamParser:
 
 			def E(want, got, msg):
 				self.ArgParseError(i, vl0, want, got, opt=msg)
-			if argc != 3:
-				E('3 args', '%d args' % argc, 'bad arity')
+			if argc != 2 or argc != 3:
+				E('2 or 3 args', '%d args' % argc, 'bad arity')
+				
 			validate_gam_line(args)
 
-			if tk3 != GamLine.TK_TXT and tk3 != GamLine.TK_NUM:
-				E('text or number', GamLine.find_tk_str(tk3),
-					'expected text or number')
-
-			return [GamNam(E, vl0, vl1), GamValConst(E, vl2)]
+			if argc == 3:
+				if tk2 != GamLine.TK_TXT and tk2 != GamLine.TK_NUM:
+					E('text or number', Gam.find_tk_str(tk2),
+						'expected text or number')
+			ret = [GamNam(E, vl0, vl1), GamValConst(E, vl2)]
+			return ret
 
 
 		def args_poly(args):
@@ -850,12 +891,15 @@ class GamParser:
 			def E(want, got, msg):
 				self.ArgParseError(i, vl0, want, got, opt=msg)
 
-			if argc < 3:
-				E('3+ args', '%d args' % argc, 'bad arity')
+			if argc < 2:
+				E('2 or more args', '%d args' % argc, 'bad arity')
 			validate_gam_line(args)
 
-			raw = ''.join([x[1] for x in args[2:]])
-			return [GamNam(E, vl0, vl1), GamValPoly(E, raw)]
+			raw = None
+			if argc > 2:
+				raw = ''.join([x[1] for x in args[2:]])
+			ret = [GamNam(E, vl0, vl1), GamValPoly(E, raw)]
+			return ret
 
 		
 		def delta_gam(gs, args):
@@ -872,7 +916,7 @@ class GamParser:
 
 		def delta_app(gs, args):
 			if gs.game is None:
-				# history hack to remove failed add
+				# history hack to remove failed append
 				gs.comms[gs.step_counter].line.line = 'APPFAIL'
 				return '%s\tno game loaded\n' % 'APP\n'
 
@@ -962,6 +1006,21 @@ class GamParser:
 		
 			return o2('START', a)
 
+		def delta_reset(gs, args):
+			if gs.game is None:
+				# history hack to remove failed add
+				gs.comms[gs.step_counter].line.line = 'RSTFAIL'
+				return '%s\tno game loaded\n' % 'RESET\n'
+			elif len(args) > 0:
+				ts = gs.game.reset(to=args[0])
+			else:
+				ts = gs.game.reset()
+				# hack to get ts in RESET line for the record
+				gs.comms[gs.step_counter].line.line += \
+					' ' + str(ts)
+
+			return o2('RESET', dt_str(ts_to_dt(ts)))
+
 		def delta_ppa(gs, args):
 			schema = []
 			a, b = stack_pop_two(gs)
@@ -975,32 +1034,62 @@ class GamParser:
 			except BadGamError as e:
 				raise GamException(gs, msg=str(e))
 		
-			return o2('APPENDED', i)
+			return o2('APPED', i)
 
 		def delta_trm(gs, args):
 			#gs.stack_push()
 			gs.stack_push(gs.sh)
 
+		def delta_add(gs, args):
+			if gs.game is None:
+				# history hack to remove failed add
+				gs.comms[gs.step_counter].line.line = 'ADDFAIL'
+				return '%s\tno game loaded\n' % 'APP\n'
 
+			gs.stack_push('ADD')
+			gs.stack_push(None) # keep pushing 2 things at once
+			return o2('ADD', 'now')
+
+		# arg1: target
+		# arg2..n: operands
 		def delta_dda(gs, args):
-			schema = []
-			a, b = stack_pop_two(gs)
-			#lhs = gs.game.schema.get(
+			rhss = [(stack_pop_two(gs))]
+			nam = rhss[-1][1]
+			val = rhss[-1][0]
 			i=0
-			while b != 'ADD':
-				schema += [(b, a)]
-				a, b = stack_pop_two(gs)
+			while nam != 'ADD':
+				next_rhs = gs.game.schema.get(str(nam), None)
+				# init target to 0 implicitly,
+				# append args as implicit fallback
+				if next_rhs is None:
+					gs.game.append([(nam, val)])
+				rhss += [(stack_pop_two(gs))]
+				nam = rhss[-1][1]
 				i += 1
-				if i > 2:
-					raise GamException(gs, msg='too many things to add')
+			# if i < 1, then we have no target argument
+			if i < 1:
+				raise GamException(gs, 'no target for ADD')
+			# last two in rhss are NONE,ADD
+			# penultimate pair in rhss are lhs
+			nam, val = rhss[-2][1], rhss[-2][0]
+			DP('nav: %s, val: %s' % (str(nam), str(val)))
+			target = gs.game.schema.get(str(nam), None)
+
+			if target is None:
+				gs.game.append([(nam, val)])
+				target = gs.game.schema[str(nam)]
+
+			# cut off arget and NONE,ADD at bottom
+			#DP('RHSS: %s' % str(rhss))
+			rhs_ = rhss[:len(rhss)-2]
+			#DP('RHS_: %s' % str(rhs_))
+
+			for rhs in rhs_:
+				nam, val = rhs[1], rhs[0]
+				rhs_poly = gs.game.schema.get(str(nam), (None, val))[1]
+				target[1].addto(rhs_poly)
 
 
-
-			try:
-				gs.game.append(schema)
-			except BadGamError as e:
-				raise GamException(gs, msg=str(e))
-		
 			return o2('ADDED', i)
 
 		def delta_led(gs, args):
@@ -1022,6 +1111,9 @@ class GamParser:
 
 		def delta_appfail(gs, args):
 			return 'APPFAIL\n'
+
+		def delta_addfail(gs, args):
+			return 'ADDFAIL\n'
 
 		def delta_delfail(gs, args):
 			return 'DELFAIL\n'
@@ -1059,12 +1151,21 @@ class GamParser:
 			gs.stack_push(arg)
 			return o2('ARG', '%s' % arg)
 
-		def delta_gamdata(gs, args):
+		def _delta_gamdata(gs, args, pre='SET\t', mid='TO', show_val=True):
+			argc = len(args)
 			gs.stack_push(args[0])
 			gs.stack_push(args[1])
-			#return 'SET\t%s\tTO\t %s\n' % (str(args[0]), str(args[1]))
-			return o3(str(args[0]), 'TO',
-				  str(args[1]), pre='SET\t')
+			third = ''
+			if show_val:
+				third = str(args[1])
+			return o3(str(args[0]), mid, third, pre=pre)
+
+		def delta_dataget(gs, args, pre='SET\t'):
+			return _delta_gamdata(gs, args, pre='GET\t', mid='', show_val=False)
+
+		def delta_gamdata(gs, args):
+			return _delta_gamdata(gs, args)
+
 
 		def delta_eof(gs, args):
 			DP('entering EOF mode')
@@ -1086,12 +1187,15 @@ class GamParser:
 		GamParser.ST_NONE : { # STATE NONE: DEFAULT
 		'GAM': 	 (args_float_1opt, 	delta_gam, 	GamParser.ST_GAM),
 		'APP': 	 (lambda x:[],		delta_app, 	GamParser.ST_APP),
+		'ADD': 	 (lambda x:[],		delta_add, 	GamParser.ST_ADD),
 		'DEL':   (lambda x:[],		delta_del, 	GamParser.ST_DEL),
 		'EOF': 	 (lambda x:[], 		delta_eof, 	GamParser.ST_EOF),
+		'RESET': (args_float_1opt, 	delta_reset, 	None),
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'RUN':   (args_txt_1,		delta_run, 	GamParser.ST_ARG),
 		'RUNFAIL':(args_txt_1,		delta_runfail, 	None),
 		'APPFAIL':(lambda x:[],		delta_appfail, 	None),
+		'ADDFAIL':(lambda x:[],		delta_addfail, 	None),
 		'DELFAIL':(lambda x:[],		delta_delfail, 	None),
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
 		'REPORT':(args_float_1opt,	delta_report, 	None),
@@ -1124,7 +1228,13 @@ class GamParser:
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'CONST': (args_const,		delta_gamdata, 	None),
-		'POLY':	 (args_poly,		delta_gamdata, 	None)}
+		'POLY':	 (args_poly,		delta_gamdata, 	None)},
+		GamParser.ST_ADD : { # STATE ADD: add polynomials
+		'ADD':   (lambda x:[],		delta_dda, 	GamParser.ST_NONE),
+		'DUMP':  (args_int_1opt,	delta_dump, 	None),
+		'DROP':  (args_int_1opt,	delta_drop, 	None),
+		'CONST': (args_const,		delta_dataget, 	None),
+		'POLY':	 (args_poly,		delta_dataget, 	None)}
 		}
 
 		# get map of valid acts for current state
@@ -1200,6 +1310,15 @@ class Gam:
 	def started_str(self):
 		return self._started_str(self.timestamp)
 
+	def reset(self, to=None):
+		if to:
+			ts = to
+		else:
+			ts = datetime.utcnow().timestamp()
+		self.timestamp = ts
+		return ts
+
+
 	def report(self, ts, warp=0):
 		t = self.t(ts)
 		t_w = self.t(ts + warp)
@@ -1208,14 +1327,19 @@ class Gam:
 		t_w_str = '%.2f' % t_w
 		w_str = '%.2f' % warp
 
-		output  = o3('nam(f)', 'f(t+w)', 'f', 	pre='\t')
-		output += o3('t+w', 	t_w_str, '', 	pre='\t')
-		output += o3('t', 	t_str, '', 	pre='\t')
-		output += o3('w', 	w_str, '', 	pre='\t')
+		output  = ''
+		output += oline('-')
+		output += o3('nam(f)\t', 'f(t+w)', 'f')
+		output += oline('-')
+		output += o3('t+w\t', 	t_w_str, '',)
+		output += o3('t\t', 	t_str, '')
+		output += o3('w\t', 	w_str, '')
 		for k in self.schema:
 			pair = self.schema[k]
-			output += o3(k, str(pair[1].f(t_w)),
-					str(pair[1]),   pre='\t')
+			e = ''
+			if len(k) < 8:
+				e = '\t'
+			output += o3(k + e, str(pair[1].f(t_w)), str(pair[1]))
 		return output
 
 	def __repr__(self):
@@ -1265,6 +1389,16 @@ class GamSt:
 		x = self.stack[0]
 		del self.stack[0]
 		return x
+
+	def stack_str(self):
+		border = '\n==========[STACK]==========\n'
+		output = border
+		i=0
+		for d in self.stack:
+			output += '{%03d}\t%s\n' % (len(self.stack)-i-1, str(d))
+			i += 1
+		output += border
+		return output
 
 	def invalidate(self):
 		self.valid = False
@@ -1432,7 +1566,7 @@ def run_game(user_lines, user):
 	if gs.is_valid():
 		h = gs.history()
 		db = 'History:\n%s\n' % str(h)
-		DP(db)
+		#DP(db)
 		tmp, res = attempt_save(h, user)
 		if res is not None:
 			output += tmp
@@ -1496,6 +1630,14 @@ def handle_US(env, SR):
 
 	return generate_html(base, msgs, env, SR)
 
+def handle_clicker(env, SR):
+	user = get_authorized_user(env)
+
+	base = GAME_HTML % user
+
+	msgs = [('user', user), ('appver', appver())]
+
+	return generate_html(base, msgs, env, SR)
 
 def handle_404(env, SR):
 	user = get_authorized_user(env)
@@ -1505,5 +1647,6 @@ def handle_404(env, SR):
 		"<h1>HTTP ERROR 404: NOT FOUND</h1>" + msgs, SR)
 
 def application(env, SR):
-	return {'/US': handle_US, '/terminal':handle_terminal} \
-		.get(env.get('PATH_INFO',''), handle_404)(env, SR)
+	return {'/US': handle_US, '/terminal':	handle_terminal \
+				, '/clicker':	handle_clicker} \
+		.get(env.get('PATH_INFO',''), 	handle_404)(env, SR)
