@@ -12,7 +12,7 @@ APPLICATION="mars"
 
 buy_pp = button('Buy', a='type="submit" name="pickpockets"')
 buy_mg = button('Buy', a='type="submit" name="muggers"')
-steal_button = table.button('Steal', a='type="submit" name="steal"')
+steal_button = button('Steal', a='type="submit" name="steal"')
 
 GAME_HTML="""
 <div class="welcome">
