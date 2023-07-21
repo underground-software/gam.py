@@ -6,10 +6,14 @@ from math import log
 
 from config import PREPEND, AUTH_USERS, AUTH_SERVER, SH_PATH
 
-from table import table
+import table
 
 VERSION="0.1"
 APPLICATION="mars"
+
+buy_pp = table.button('Buy', a='type="submit" name="pickpockets"')
+buy_mg = table.button('Buy', a='type="submit" name="muggers"')
+steal_button = table.button('Steal', a='type="submit" name="steal"')
 
 GAME_HTML="""
 <div class="welcome">
@@ -17,17 +21,21 @@ GAME_HTML="""
 </div>
 <div id="clicker" >
 	<div class="units">
+		<form action="" method="post">
 		%(units)s
+		</form>
 	</div>
 	<div class="stats">
+		<form action="" method="post">
 		%(stats)s
+		</form>
 	</div>
 </div>
 """.strip() % {
-	'units': table([
-	('type', 'count'),
-	('pickpockets', '0'),
-	('muggers', '0'),
+	'units': table.table([
+	('type', 'count', 'effect', 'cost', 'buy'),
+	('pickpockets', '%(pp)s', '%(pprate)s', '%(ppcost)s', buy_pp),
+	('muggers', '%(mg)s', '%(mgrate)s', '%(mgcost)s', buy_mg),
 	('home invaders', '0'),
 	('carjackers', '0'),
 	('bank robbers', '0'),
@@ -36,10 +44,11 @@ GAME_HTML="""
 	('darknet moguls', '0'),
 	('high seas pirates', '0'),
 	('investment bankers', '0')
-	]), 'stats' : table([
+	]), 'stats' : table.table([
 	('key', 'value'),
-	('victims', '0')
-	]), 'user': '%s'}
+	('victims', '%(victims)s'),
+	('steal', steal_button)
+	]), 'user': '%(user)s'}
 
 # meta tag from https://stackoverflow.com/questions/7073396/disable-zoom-on-input-focus-in-android-webpage
 TERMINAL_HTML="""
@@ -393,7 +402,11 @@ class GamValPoly(GamVal):
 		total=0
 		try:
 			for p in self.pairs:
-				total += self.pairs[p] * (t ** p)
+				if  t == 0 and p < 0:
+					b = 0
+				else:
+					b =  t ** p
+				total += self.pairs[p] * b
 				#DP('POLY TERM %g = %g * t ^ %g' % (total, self.pairs[p], p))
 			return total
 		except OverflowError:
@@ -476,7 +489,10 @@ class GamValNatty(GamVal):
 		return '%g' % self.val
 
 	def addto(self, gs, rhs):
-		if rhs.t == GamVal.T_POLY:
+		if rhs.valtype() == GamVal.T_POLY:
+			DP('ADD(self=%d, rhs=%d @ t=%d, f=%s)' % \
+				(self.val, rhs.f_raw(self.t), self.t, str(rhs)))
+
 			tmp = self.val + rhs.f_raw(self.t)
 			if tmp < 0:
 				raise GamException(gs, 'unsupported attempt to negatize natty')
@@ -559,10 +575,13 @@ class GamLine:
 	CH_PLS=1<<21	# plus (+)
 	CH_UND=1<<22	# underscore (_)
 	CH_SEP=1<<23	# vertical separator (|)
+	CH_QUE=1<<24	# question mark (?)
+	CH_SQT=1<<25	# single quote (')
+	CH_BKT=1<<26	# backtick (`)
 	# consider , and  ! to be part of string text input domain
 	CH_TXT=CH_ALP + CH_COM + CH_BNG + CH_RAN + CH_LAN + CH_RSQ + CH_LSQ \
 		      + CH_SCL + CH_RPR + CH_LPR + CH_EQL + CH_PLS + CH_UND \
-		      + CH_SEP + CH_AAT + CH_DSH
+		      + CH_SEP + CH_AAT + CH_DSH + CH_QUE + CH_SQT + CH_BKT
 	CH_NUM=CH_DIG
 	# dash only valid at start of number
 	CH_SNM=CH_NUM + CH_DSH
@@ -575,6 +594,7 @@ class GamLine:
 		(lambda c: c == '/', 	CH_SLS),
 		(lambda c: c == '.', 	CH_DOT),
 		(lambda c: c == '"', 	CH_QUT),
+		(lambda c: c == '\'', 	CH_SQT),
 		(lambda c: c == ',', 	CH_COM),
 		(lambda c: c == '!', 	CH_BNG),
 		(lambda c: c == '-', 	CH_DSH),
@@ -589,7 +609,9 @@ class GamLine:
 		(lambda c: c == '=', 	CH_EQL),
 		(lambda c: c == '+', 	CH_PLS),
 		(lambda c: c == '_', 	CH_UND),
+		(lambda c: c == '?', 	CH_QUE),
 		(lambda c: c == '|', 	CH_SEP),
+		(lambda c: c == '`', 	CH_BKT),
 		(lambda c: c == chr(0),	CH_NIL),
 		(lambda c: True, 	CH_OTH)]
 
@@ -816,7 +838,9 @@ class GamParser:
 	ST_APP	= 1<<4
 	ST_DEL	= 1<<5
 	ST_ADD	= 1<<6
-	ALL_STATES = [ST_NONE, ST_GAM, ST_ARG, ST_EOF, ST_APP, ST_DEL, ST_ADD]
+	ST_FNC	= 1<<7
+	ALL_STATES = [ST_NONE, ST_GAM, ST_ARG, ST_EOF, \
+			ST_APP, ST_DEL, ST_ADD, ST_FNC]
 
 	def state(self):
 		return self._state
@@ -835,7 +859,8 @@ class GamParser:
 			GamParser.ST_EOF: '[Parse State EOF]',
 			GamParser.ST_APP: '[Parse State Append]',
 			GamParser.ST_DEL: '[Parse State Delete]',
-			GamParser.ST_ADD: '[Parse State Add]'
+			GamParser.ST_ADD: '[Parse State Add]',
+			GamParser.ST_FNC: '[Parse State Function]'
 				}.get(st, '[Parse State Unknown]')
 
 	def state_str(self):
@@ -1070,11 +1095,12 @@ class GamParser:
 				# hack to get start time in save:
 				gs.comms[gs.step_counter].line.line += \
 					' ' + str(ts_dt.timestamp())
+				ts_dt = None
 			else:
 				ts_dt = ts_to_dt(args[0])
 			gs.stack_push('GAM')
 			gs.stack_push(ts_dt)
-			return o2('GAM', ts_dt)
+			return o2('GAM', ts_dt if ts_dt else 'new')
 
 		def delta_app(gs, args):
 			if gs.game is None:
@@ -1161,7 +1187,11 @@ class GamParser:
 				schema += [(b, a)]
 				a, b = stack_pop_two(gs)
 			try:
-				gs.game = Gam(schema, a.timestamp())
+				if a:
+					gs.game = Gam(schema, a.timestamp())
+				else:
+					ts = datetime.utcnow().timestamp()
+					gs.game = Gam(schema, ts)
 				gs._warp = 0
 			except BadGamError as e:
 				raise GamException(gs, msg=str(e))
@@ -1227,6 +1257,7 @@ class GamParser:
 					gs.game.append([(nam, val)])
 				rhss += [(stack_pop_two(gs))]
 				nam = rhss[-1][1]
+				val = rhss[-1][0]
 				i += 1
 			# if i < 1, then we have no target argument
 			if i < 1:
@@ -1315,39 +1346,54 @@ class GamParser:
 			gs.stack_push(arg)
 			return o2('ARG', '%s' % arg)
 
-		def _delta_gamdata(gs, args, pre='SET\t', mid='TO', show_val=True):
+		def _delta_gamdata(gs, args, pre='SET\t', mid='TO', get_val=False):
 			argc = len(args)
 			gs.stack_push(args[0])
 			gs.stack_push(args[1])
-			third = ''
-			if show_val:
-				third = str(args[1])
+
+			third = str(args[1])
+			if get_val and gs.game:
+				lookup = gs.game.schema.get(str(args[0]), None)
+				if lookup:
+					third = lookup[1]
+
 			return o3(str(args[0]), mid, third, pre=pre)
 
 		def delta_dataget(gs, args, pre='SET\t'):
-			return _delta_gamdata(gs, args, pre='GET\t', mid='', show_val=False)
+			return _delta_gamdata(gs, args, pre='GET\t', mid='', get_val=True)
 
 		def delta_gamdata(gs, args):
 			return _delta_gamdata(gs, args)
 
 		def _delta_natty(gs, args, doget=False):
 			argc= len(args)
+
+			natty = args[1]
+			if gs.game:
+				lookup = gs.game.schema.get(str(args[0]), None)
+				if lookup:
+					natty = lookup[1]
+
 			pre='SET\t'
 			mid='TO'
 			if doget:
 				pre = 'GET\t'
 				mid = ''
-			if args[1].t is None:
+				if natty.default:
+					mid = 'DFLT'
+			if natty.t is None:
 				first =''
-				if args[1].default:
-					first = '%s ' % str(args[1].val)
+				if natty.default:
+					first = '%s ' % str(natty.val)
 				#DP('found argc=%s, args = %s' % (argc, str(args)))
-				#ts = datetime.utcnow().timestamp()
-				t = int(args[1].val)
+				t = int(gs.t())
+				#t = int(args[1].val)
 				# hack to get start time in save:
 				gs.comms[gs.step_counter].line.line += \
 					' %s%s' % (first, str(t))
-				args[1].t = t
+				natty.t = t
+
+			args[1] = natty
 
 			return _delta_gamdata(gs, args, pre=pre, mid=mid)
 			
@@ -1372,12 +1418,57 @@ class GamParser:
 				if len(gs.comms[gs.step_counter].line.lexxed[0][1]) > 0 \
 				else '\n'
 		
+		def delta_fnc(gs, args):
+			if len(args) < 1:
+				t = gs.t()
+				# hack to get start time in save:
+				gs.comms[gs.step_counter].line.line += \
+					' ' + str(t)
+			else:
+				t = args[0]
+			gs.stack_push('FNC')
+			gs.stack_push(t)
+			return o2('F', t if t else 'now')
+
+		def delta_cnf(gs, args):
+			rhss = [(stack_pop_two(gs))]
+			nam = rhss[-1][1]
+			val = rhss[-1][0]
+			i=0
+			vals = []
+			while nam != 'FNC':
+				next_input = gs.game.schema.get(str(nam), None)
+				# init input to 0 implicitly,
+				# append args as implicit fallback
+				if next_input is None:
+					gs.game.append([(nam, val)])
+					next_input = gs.game.schema.get(str(nam), None)
+				vals += [next_input[1]]
+
+				rhss += [(stack_pop_two(gs))]
+				nam = rhss[-1][1]
+				val = rhss[-1][0]
+				i += 1
+			# if i < 1, then we have no target argument
+			if i < 1:
+				raise GamException(gs, 'no input for F')
+			# when nam == 'FNC', val contains t
+			t = val
+			o = '\n'
+			for v in vals:
+				# in reverse order since
+				# they were reversed
+				# by the stack
+				o = '\n%s' % v.f(t) + o
+			return o
+
 		state_map = {
 		# ACT 	 PROCESS ARGS		DELTA FUNC	STATE CHANGE
 		GamParser.ST_NONE : { # STATE NONE: DEFAULT
 		'GAM': 	 (args_float_1opt, 	delta_gam, 	GamParser.ST_GAM),
 		'APP': 	 (lambda x:[],		delta_app, 	GamParser.ST_APP),
 		'ADD': 	 (lambda x:[],		delta_add, 	GamParser.ST_ADD),
+		'F': 	 (args_float_1opt,	delta_fnc, 	GamParser.ST_FNC),
 		'DEL':   (lambda x:[],		delta_del, 	GamParser.ST_DEL),
 		'EOF': 	 (lambda x:[], 		delta_eof, 	GamParser.ST_EOF),
 		'RESET': (args_float_1opt, 	delta_reset, 	None),
@@ -1425,6 +1516,12 @@ class GamParser:
 		GamParser.ST_ADD : { # STATE ADD: add polynomials
 		'ADD':   (lambda x:[],		delta_dda, 	GamParser.ST_NONE),
 		'DUMP':  (args_int_1opt,	delta_dump, 	None),
+		'DROP':  (args_int_1opt,	delta_drop, 	None),
+		'CONST': (args_const,		delta_dataget, 	None),
+		'NATTY': (args_natty,		delta_getnatty,	None),
+		'POLY':	 (args_poly,		delta_dataget, 	None)},
+		GamParser.ST_FNC : { # STATE FNC: get value of data
+		'F':  	 (lambda x:[],		delta_cnf, 	GamParser.ST_NONE),
 		'DROP':  (args_int_1opt,	delta_drop, 	None),
 		'CONST': (args_const,		delta_dataget, 	None),
 		'NATTY': (args_natty,		delta_getnatty,	None),
@@ -1769,7 +1866,6 @@ def run_game(user_lines, user):
 		tmp, res = attempt_save(h, user)
 		if res is not None:
 			output += tmp
-
 	return output
 
 def process_req_body(req_body, user):
@@ -1829,12 +1925,101 @@ def handle_US(env, SR):
 
 	return generate_html(base, msgs, env, SR)
 
+CLICKER_SCHEMA="""
+gam
+poly pp	 		0:0
+poly ppcost		-10:0
+poly pprate		0.1:1
+poly mg			0:0
+poly mgcost		-100:0
+poly mgrate		0.5:1
+poly homeinvaaders	0:0
+poly carjackers		0:0
+poly bankrobbers	0:0
+poly mailfraudsters	0:0
+poly cryptoscammers	0:0
+poly darknetmoguls 	0:0
+poly highseaspirates	0:0
+poly investmentbankers	0:0
+natty victims 		0
+poly one 		1:0
+gam
+""".strip()
+
+def run_clicker(clicker_lines, user):
+	gs = GamSt(user)
+
+	msg, saved_lines = attempt_load('%s.clicker' % user)
+	# if new game: FIXME this condition might be wrong
+	if saved_lines == []:
+		saved_lines = CLICKER_SCHEMA.split('\n')
+	DP(msg)
+	input_lines = saved_lines + clicker_lines
+
+	out_pre=''
+	for l in input_lines:
+		out_pre += gs.lexx_parse(l)
+		if gs.error is not None:
+			DP(out_pre)
+			break
+
+	output=''
+	while gs.ready():
+		output += gs.run_step()
+
+	if gs.is_valid():
+		h = gs.history()
+		db = 'History:\n%s\n' % str(h)
+		#DP(db)
+		tmp, res = attempt_save(h, '%s.clicker' % user)
+	
+	return output
+
+
 def handle_clicker(env, SR):
 	user = get_authorized_user(env)
 
-	base = GAME_HTML % user
-
 	msgs = [('user', user), ('appver', appver())]
+
+	req_body = None
+	if is_post_req(env):
+		req_body_size = get_req_body_size(env)
+		req_body = html.escape(str(env['wsgi.input'].read(req_body_size), "UTF-8"))
+		msgs += [('body', req_body)]
+	
+	pickpockets = 5
+	victims = 0
+	gamein = []
+	if req_body == 'steal=':
+		gamein += ['add', 'natty victims', 'poly one', 'add']
+	
+	if req_body == 'pickpockets=':
+		DP('pickpock!!')
+		gamein += ['add', 'natty victims', 'poly ppcost', 'add']
+		gamein += ['add', 'poly pp', 'poly one', 'add']
+				
+
+	info = run_clicker(gamein, user)
+
+	getinfo = ['f',
+		'poly mg',
+		'poly pp',
+		'natty victims', 'f']
+	output = run_clicker(getinfo, user)
+	victims = output.split('\n')[-2]
+	pickpockets = output.split('\n')[-3]
+	muggers = output.split('\n')[-4]
+
+	base = GAME_HTML % {
+		'user': 	user,
+		'pp': 		pickpockets,
+		'pprate': 	'0.1 v/s',
+		'ppcost': 	'10 v',
+		'mg':		muggers,
+		'mgrate':	'0.5 v/s',
+		'mgcost':	'100 v',
+		'victims': 	victims 
+	}
 
 	return generate_html(base, msgs, env, SR)
 
