@@ -5,10 +5,7 @@ from http import cookies
 from math import log
 
 from config import AUTH_USERS, SH_PATH
-
-from orbit import appver, messageblock, ROOT, DP, AUTH_SERVER
-
-from table import table
+from orbit import appver, messageblock, ROOT, DP, AUTH_SERVER, table
 
 VERSION="0.1"
 APPLICATION="mars"
