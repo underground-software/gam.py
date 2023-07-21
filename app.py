@@ -4,15 +4,13 @@ from datetime import datetime
 from http import cookies
 from math import log
 
-from config import PREPEND, AUTH_USERS, AUTH_SERVER, SH_PATH
+from config import AUTH_USERS, SH_PATH
+
+from orbit import appver, messageblock, ROOT, DP, AUTH_SERVER
 
 VERSION="0.1"
 APPLICATION="mars"
 
-GAME_HTML="""
-
-
-"""
 
 # meta tag from https://stackoverflow.com/questions/7073396/disable-zoom-on-input-focus-in-android-webpage
 TERMINAL_HTML="""
@@ -42,23 +40,6 @@ TERMINAL_HTML="""
 </div>
 """
 
-def DP(strg):
-	print(strg, file=sys.stderr)
-
-def appver():
-	return "%s %s" % (APPLICATION, VERSION)
-
-def messageblock(lst):
-	res=''
-	sep = '<br /><hr /><br />'
-
-	res += sep
-	for item in lst:
-		res += "<code>%s = %s</code><br />" % (item[0], str(item[1]))
-	res += sep
-
-	return res
-
 def ok_html(doc, SR, extra_headers=[]):
 	SR('200 Ok', [('Content-Type', 'text/html')] + extra_headers)
 	return bytes(doc, "UTF-8")
@@ -69,9 +50,8 @@ def notfound_html(doc, SR):
 
 def prepend():
 	head=''
-	for n in PREPEND:
-		with open(n, 'r') as f:
-			head += f.read()
+        with open(ROOT + '/data/header', 'r') as f:
+                head += f.read()
 	return head
 
 def generate_html(doc, msgs, env, SR):
