@@ -31,7 +31,7 @@ GAME_HTML="""
 	</div>
 </div>
 """.strip() % {
-	'units': table.table([
+	'units': table([
 	('type', 'count', 'effect', 'cost', 'buy'),
 	('pickpockets', '%(pp)s', '%(pprate)s', '%(ppcost)s', buy_pp),
 	('muggers', '%(mg)s', '%(mgrate)s', '%(mgcost)s', buy_mg),
@@ -43,7 +43,7 @@ GAME_HTML="""
 	('darknet moguls', '0'),
 	('high seas pirates', '0'),
 	('investment bankers', '0')
-	]), 'stats' : table.table([
+	]), 'stats' : table([
 	('key', 'value'),
 	('victims', '%(victims)s'),
 	('steal', steal_button)
